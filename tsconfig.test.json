@@ -1,0 +1,17 @@
+{
+	"compilerOptions": {
+		"module": "Node16",
+		"target": "ES2022",
+		"outDir": "out/test-unit",
+		"rootDir": ".",
+		"lib": [
+			"ES2022"
+		],
+		"types": [
+			"node"
+		],
+		"sourceMap": true,
+		"strict": true
+	},
+	"include": ["test/**/*"]
+}

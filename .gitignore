@@ -1,0 +1,41 @@
+# Node dependencies
+node_modules/
+
+# Compiled output
+out/
+dist/
+build/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.log
+
+# VS Code test output
+.vscode-test/
+
+# VS Code workspace settings (optional)
+.vscode/*
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/tasks.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment variables
+.env
+.env.*
+
+# Packaging artifacts
+*.vsix
+
+# Coverage
+coverage/
+
+# Temporary files
+*.tmp
+*.temp

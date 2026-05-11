@@ -1,0 +1,132 @@
+{
+  "name": "flight-recorder",
+  "publisher": "SE-SIC",
+  "displayName": "Flight Recorder",
+  "description": "Records interactions with GitHub Copilot",
+  "icon": "assets/icon.png",
+  "repository": {
+		"type": "git",
+		"url": "https://github.com/se-sic/flight-recorder"
+	},
+  "version": "0.2.3",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "engines": {
+    "vscode": "^1.108.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "flightRecorder.start",
+        "title": "Flight Recorder: Start Recording",
+        "icon": "$(record)"
+      },
+      {
+        "command": "flightRecorder.stop",
+        "title": "Flight Recorder: Stop Recording",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "flightRecorder.printLog",
+        "title": "Flight Recorder: Print Copilot Log Path"
+      },
+      {
+        "command": "flightRecorder.exportAllChats",
+        "title": "Flight Recorder: Export All Chats"
+      },
+      {
+        "command": "flightRecorder.anonymizeRepo",
+        "title": "Flight Recorder: Anonymize Repository"
+      },
+      {
+        "command": "flightRecorder.editHistoryVisualization",
+        "title": "Flight Recorder: Open Edit History Visualization"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "flightRecorder.start",
+          "when": "!flightRecorder.isRecording",
+          "group": "1_run@1"
+        },
+        {
+          "command": "flightRecorder.stop",
+          "when": "flightRecorder.isRecording",
+          "group": "1_run@2"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Flight Recorder",
+      "properties": {
+        "flightRecorder.debounceMs": {
+          "type": "number",
+          "default": 1000
+        },
+        "flightRecorder.addAll": {
+          "type": "boolean",
+          "default": false
+        },
+        "flightRecorder.allowEmpty": {
+          "type": "boolean",
+          "default": false
+        },
+        "flightRecorder.dryRun": {
+          "type": "boolean",
+          "default": false,
+          "description": "Do not run git commit; only print what would be committed."
+        },
+        "flightRecorder.forceAddGeneratedLogs": {
+          "type": "boolean",
+          "default": true,
+          "description": "When true, force-stage generated .log and .chat-log artifacts so ignore rules do not block their dedicated commits."
+        },
+        "flightRecorder.exportChatsOnStop": {
+          "type": "boolean",
+          "default": true,
+          "description": "When true, automatically export chat session files into .chat-log and commit them as a separate shutdown commit."
+        },
+        "flightRecorder.absolutePathHandling": {
+          "type": "string",
+          "enum": [
+            "none",
+            "repoOnly",
+            "all"
+          ],
+          "enumDescriptions": [
+            "Do not replace any absolute paths.",
+            "Replace only absolute paths that contain the repository root.",
+            "Replace all absolute paths found in content and commit messages."
+          ],
+          "default": "repoOnly",
+          "description": "Controls how absolute paths are handled during repository anonymization."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src",
+    "test": "vscode-test",
+    "test:unit": "tsc -p tsconfig.test.json && node --test out/test-unit/test/**/*.test.js"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "22.x",
+    "@types/vscode": "^1.108.0",
+    "@vscode/test-cli": "^0.0.11",
+    "@vscode/test-electron": "^2.5.2",
+    "eslint": "^9.39.2",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.54.0"
+  }
+}
