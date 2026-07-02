@@ -9,7 +9,7 @@ import {
   initializeRecordingContext,
   initializeRecordingStatusBar,
   isRecording,
-  showCopilotLogPath,
+  showAssistantLogPath,
   startRecording,
   stopRecording,
   deactivateRecording,
@@ -64,7 +64,7 @@ export function activate(context: vscode.ExtensionContext) {
   const printCmd = vscode.commands.registerCommand(
     "flightRecorder.printLog",
     async () => {
-      await showCopilotLogPath(context);
+      await showAssistantLogPath(context);
     }
   );
 

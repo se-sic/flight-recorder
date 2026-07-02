@@ -27,13 +27,19 @@ test("CopilotLogParser parses edit-tool patch events", () => {
 
   assert.equal(events.length, 1);
   const ev = events[0];
-  console.log(ev);
-  assert.equal(ev.signal, "edit-tool");
-  assert.equal(ev.origin, "agent-edit");
+  assert.equal(ev.kind, "edit-applied");
+  assert.equal(ev.capability, "file-edit");
   assert.equal(ev.requestId, "efcf0ac7-59d2-4c9b-b0d4-4d84a23ce134");
+  assert.equal(ev.source.assistantId, "github-copilot");
+  assert.equal(ev.source.rawSignal, "edit-tool");
 
   const expectedPath = path.resolve("/tmp/demo/foo.py");
-  assert.ok(ev.files.includes(expectedPath));
+  assert.deepEqual(ev.fileOperations, [
+    {
+      kind: "update",
+      path: expectedPath,
+    },
+  ]);
 });
 
 test("CopilotLogParser parses edit-tool when marker is in message", () => {
@@ -43,12 +49,17 @@ test("CopilotLogParser parses edit-tool when marker is in message", () => {
   assert.equal(events.length, 1);
   const ev = events[0];
 
-  assert.equal(ev.signal, "edit-tool");
-  assert.equal(ev.origin, "agent-edit");
+  assert.equal(ev.kind, "edit-applied");
+  assert.equal(ev.capability, "file-edit");
   assert.equal(ev.requestId, "efcf0ac7-59d2-4c9b-b0d4-4d84a23ce134");
 
   const expectedPath = path.resolve("/tmp/demo/foo.py");
-  assert.ok(ev.files.includes(expectedPath));
+  assert.deepEqual(ev.fileOperations, [
+    {
+      kind: "update",
+      path: expectedPath,
+    },
+  ]);
 });
 
 test("CopilotLogParser parses inline completion acceptance", () => {
@@ -60,12 +71,24 @@ test("CopilotLogParser parses inline completion acceptance", () => {
   assert.equal(events.length, 1);
   const ev = events[0];
 
-  assert.equal(ev.signal, "ghostText.accepted");
-  assert.equal(ev.origin, "inline-completion");
-  assert.equal(ev.cursorLine, 14);
-  assert.equal(ev.cursorColumn, 1);
+  assert.equal(ev.kind, "suggestion-accepted");
+  assert.equal(ev.capability, "inline-completion");
+  assert.deepEqual(ev.cursorPosition, {
+    line: 14,
+    column: 1,
+  });
 
   const normalizedExpected = path.normalize("/tmp/demo/foo.py");
-  const normalizedFiles = ev.files.map((p) => path.normalize(p));
-  assert.ok(normalizedFiles.includes(normalizedExpected));
+  assert.deepEqual(
+    ev.fileOperations.map((operation) => ({
+      kind: operation.kind,
+      path: path.normalize(operation.path ?? ""),
+    })),
+    [
+      {
+        kind: "update",
+        path: normalizedExpected,
+      },
+    ]
+  );
 });

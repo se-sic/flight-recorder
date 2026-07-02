@@ -1,6 +1,14 @@
 import * as fs from "fs";
 import * as path from "path";
-import { CompletionEvent, formatEventJson } from "./event";
+import {
+  AssistantEvent,
+  collectEventFilePaths,
+  formatAssistantEventJson,
+} from "./event";
+import {
+  formatWindowCommitMessage,
+  WindowCommit,
+} from "./staging-tracker";
 import { gitCmd, GitCommandResult } from "../utils/git";
 import { LOG_EXPORT_PATH } from "../utils/paths";
 import { EXTENSION_NAME } from "../utils/constants";
@@ -227,13 +235,16 @@ export async function fileHasChanges(
   return false;
 }
 
-function getCommitMessage(
-  evs: CompletionEvent[]
+function getAssistantCommitMessage(
+  repoRoot: string,
+  evs: AssistantEvent[]
 ): string {
   const header = evs.length === 1
-    ? `${EXTENSION_NAME}: ${evs[0].origin} event`
+    ? `${EXTENSION_NAME}: ${evs[0].source.assistantId} ${evs[0].kind}`
     : `${EXTENSION_NAME}: ${evs.length} events`;
-  const perEventMessages = evs.map((ev) => formatEventJson(ev));
+  const perEventMessages = evs.map((ev) =>
+    formatAssistantEventJson(ev, repoRoot)
+  );
   return [header, ...perEventMessages].join("\n");
 }
 
@@ -360,7 +371,7 @@ async function stageAndCommit(
 
 export async function commitForEvent(
   repoRoot: string,
-  ev: CompletionEvent,
+  ev: AssistantEvent,
   addAll: boolean,
   allowEmpty: boolean,
   dryRun: boolean
@@ -370,7 +381,7 @@ export async function commitForEvent(
 
 export async function commitForEvents(
   repoRoot: string,
-  evs: CompletionEvent[],
+  evs: AssistantEvent[],
   addAll: boolean,
   allowEmpty: boolean,
   dryRun: boolean
@@ -381,28 +392,56 @@ export async function commitForEvents(
 
   const absRepo = path.resolve(repoRoot);
   const allAbsPaths = Array.from(
-    new Set(evs.flatMap((ev) => ev.files).map((p) => path.resolve(p)))
+    new Set(
+      evs.flatMap((ev) => collectEventFilePaths(ev)).map((p) => path.resolve(p))
+    )
   );
   const relFiles = allAbsPaths
     .filter((abs) => abs === absRepo || abs.startsWith(absRepo + path.sep))
     .map((abs) => path.relative(repoRoot, abs));
-  const msg = getCommitMessage(evs);
+  const msg = getAssistantCommitMessage(repoRoot, evs);
   const lastTs = evs[evs.length - 1].timestamp;
   return stageAndCommit(repoRoot, msg, lastTs, relFiles, addAll, allowEmpty, dryRun);
+}
+
+export async function commitTrackedWindow(
+  repoRoot: string,
+  commit: WindowCommit,
+  addAll: boolean,
+  allowEmpty: boolean,
+  dryRun: boolean
+): Promise<GitActionResult> {
+  const absRepo = path.resolve(repoRoot);
+  const relFiles = Array.from(
+    new Set(
+      commit.files
+        .map((filePath) => path.resolve(filePath))
+        .filter((abs) => abs === absRepo || abs.startsWith(absRepo + path.sep))
+        .map((abs) => path.relative(repoRoot, abs))
+    )
+  );
+
+  const msg = formatWindowCommitMessage(commit, repoRoot);
+  const ts = new Date(commit.endedAt).toISOString();
+  return stageAndCommit(repoRoot, msg, ts, relFiles, addAll, allowEmpty, dryRun);
 }
 
 /**
  * Copies the current Copilot logfile into the repository, stages it, and
  * creates a final shutdown commit so the raw session log is preserved.
  */
-export async function commitCopilotLogSnapshot(
+export async function commitAssistantLogSnapshot(
   repoRoot: string,
   sourceLogFile: string,
+  snapshotPrefix: string,
   dryRun: boolean,
   forceAdd: boolean
 ): Promise<GitActionResult & { snapshotPath?: string }> {
   const stamp = (new Date()).toISOString().replace(/:/g, "-").replace(/\./g, "-");
-  const relSnapshotPath = path.join(LOG_EXPORT_PATH, `copilot-${stamp}.log`);
+  const relSnapshotPath = path.join(
+    LOG_EXPORT_PATH,
+    `${snapshotPrefix}-${stamp}.log`
+  );
   const absSnapshotPath = path.join(repoRoot, relSnapshotPath);
 
   // In dry-run mode, report what would happen without copying or committing.

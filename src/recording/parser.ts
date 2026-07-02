@@ -1,7 +1,10 @@
 import * as fs from "fs";
 import * as path from "path";
-import { URL, pathToFileURL } from "url";
-import { CompletionEvent } from "./event";
+import { URL } from "url";
+import {
+  AssistantEvent,
+  FileOperation,
+} from "./event";
 
 const TS_RE = /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}) \[(\w+)\] \[([^\]]+)\] (.*)$/;
 const ACCEPTED_RE = /\bghostText\.accepted\b(?:.*\bchoiceIndex:\s*(\d+)\b)?/;
@@ -11,7 +14,9 @@ const GET_COMPLETIONS_LOCATION_RE = /\bat\s+(\d+):(\d+)\b/;
 export function fileUriToPath(uri: string): string {
   try {
     const u = new URL(uri);
-    if (u.protocol !== "file:") return uri;
+    if (u.protocol !== "file:") {
+      return uri;
+    }
 
     // URL pathname is already decoded-ish; keep it robust
     let p = decodeURIComponent(u.pathname);
@@ -41,47 +46,64 @@ export class CopilotLogParser {
     return match ? { requestId: match[1], payload: match[2] } : null;
   }
 
-  private collectEditToolPaths(input: unknown): Set<string> {
-    const filePaths = new Set<string>();
+  private collectEditToolFileOperations(input: unknown): FileOperation[] {
+    const operations: FileOperation[] = [];
 
     if (typeof input === "string") {
-      const fileRe = /^\*\*\* (?:Update|Add|Delete) File:\s+(.+)$/gm;
+      const fileRe = /^\*\*\* (Update|Add|Delete) File:\s+(.+)$/gm;
       let match: RegExpExecArray | null;
 
       while ((match = fileRe.exec(input)) !== null) {
-        const candidate = match[1].trim();
-        if (!candidate) continue;
-        filePaths.add(path.resolve(candidate));
+        const opKind = match[1];
+        const candidate = match[2].trim();
+        if (!candidate) {
+          continue;
+        }
+        operations.push({
+          kind:
+            opKind === "Add"
+              ? "create"
+              : opKind === "Delete"
+                ? "delete"
+                : "update",
+          path: path.resolve(candidate),
+        });
       }
 
-      return filePaths;
+      return operations;
     }
 
     if (typeof input !== "object" || input === null) {
-      return filePaths;
+      return operations;
     }
 
     const inputObj = input as Record<string, unknown>;
     for (const key of ["filePath", "file", "path"]) {
       const val = inputObj[key];
       if (typeof val === "string" && val.trim()) {
-        filePaths.add(path.resolve(val));
+        operations.push({
+          kind: "update",
+          path: path.resolve(val),
+        });
       }
     }
 
-    if (filePaths.size > 0) {
-      return filePaths;
+    if (operations.length > 0) {
+      return operations;
     }
 
     for (const val of Object.values(inputObj)) {
       if (typeof val === "string" && val.trim()) {
         if (val.includes(path.sep) || val.includes("/") || /\.\w+$/.test(val)) {
-          filePaths.add(path.resolve(val));
+          operations.push({
+            kind: "unknown",
+            path: path.resolve(val),
+          });
         }
       }
     }
 
-    return filePaths;
+    return operations;
   }
 
   private getInlinePayload(tag: string, msg: string): string | null {
@@ -101,7 +123,7 @@ export class CopilotLogParser {
   // - Others produce object payloads with {filePath, oldString, newString} (extract filePath directly)
   // - Fallback: search any object for string values that look like file paths
   // The parser adapts transparently; unrecognized formats are gracefully skipped.
-  private *parseEditToolEvents(ts: string, msg: string, requestId: string): Generator<CompletionEvent> {
+  private *parseEditToolEvents(ts: string, msg: string, requestId: string): Generator<AssistantEvent> {
     let payload: unknown;
     try {
       payload = JSON.parse(msg);
@@ -119,59 +141,74 @@ export class CopilotLogParser {
       }
 
       const input = (entry as { input?: unknown }).input;
-      const filePaths = this.collectEditToolPaths(input);
-
-      const files = Array.from(filePaths).sort((a, b) => a.localeCompare(b));
-      if (files.length === 0) {
+      const fileOperations = this.collectEditToolFileOperations(input);
+      if (fileOperations.length === 0) {
         continue;
       }
 
-      const primaryPath = files[0];
       yield {
         timestamp: ts,
-        fileUri: pathToFileURL(primaryPath).toString(),
-        files,
-        origin: "agent-edit",
-        signal: "edit-tool",
+        kind: "edit-applied",
+        capability: "file-edit",
+        source: {
+          assistantId: "github-copilot",
+          adapterId: "copilot-log-parser",
+          rawSignal: "edit-tool",
+        },
+        fileOperations,
         requestId,
       };
     }
   }
 
-  private *parseInlineEvents(ts: string, msg: string): Generator<CompletionEvent> {
+  private *parseInlineEvents(ts: string, msg: string): Generator<AssistantEvent> {
     const acceptedMatch = ACCEPTED_RE.exec(msg);
     if (!acceptedMatch) {
       return;
     }
 
-    const fileUri =
-      this.lastRequestedFileUri ?? "unknown://copilot/no-file-context";
-    const filePath = fileUriToPath(fileUri);
-    const files = [filePath];
     const cursorLine = this.lastRequestedCursorLine;
     const cursorColumn = this.lastRequestedCursorColumn;
 
-    const ev: CompletionEvent = {
+    const ev: AssistantEvent = {
       timestamp: ts,
-      fileUri,
-      files,
-      origin: "inline-completion",
-      signal: "ghostText.accepted",
-      ...(cursorLine !== null ? { cursorLine } : {}),
-      ...(cursorColumn !== null ? { cursorColumn } : {}),
+      kind: "suggestion-accepted",
+      capability: "inline-completion",
+      source: {
+        assistantId: "github-copilot",
+        adapterId: "copilot-log-parser",
+        rawSignal: "ghostText.accepted",
+      },
+      fileOperations: [
+        {
+          kind: "update",
+          path: fileUriToPath(
+            this.lastRequestedFileUri ?? "unknown://copilot/no-file-context"
+          ),
+        },
+      ],
+      cursorPosition:
+        cursorLine !== null
+          ? {
+              line: cursorLine,
+              column: cursorColumn ?? 1,
+            }
+          : undefined,
     };
 
     yield ev;
   }
 
-  *feed(chunk: string): Generator<CompletionEvent> {
+  *feed(chunk: string): Generator<AssistantEvent> {
     const combined = this.partialLine + chunk;
     const lines = combined.split(/\r?\n/);
     this.partialLine = lines.pop() ?? "";
 
     for (const line of lines) {
       const m = TS_RE.exec(line);
-      if (!m) continue;
+      if (!m) {
+        continue;
+      }
 
       const ts = m[1];
       const tag = m[3];
@@ -220,19 +257,25 @@ export class Tailer {
   }
 
   close() {
-    if (this.fd !== null) fs.closeSync(this.fd);
+    if (this.fd !== null) {
+      fs.closeSync(this.fd);
+    }
     this.fd = null;
   }
 
   readNew(): string {
-    if (this.fd === null) return "";
+    if (this.fd === null) {
+      return "";
+    }
     const st = fs.statSync(this.filePath);
     if (st.size < this.offset) {
       // rotated/truncated
       this.offset = 0;
     }
     const len = st.size - this.offset;
-    if (len <= 0) return "";
+    if (len <= 0) {
+      return "";
+    }
 
     const buf = Buffer.alloc(len);
     fs.readSync(this.fd, buf, 0, len, this.offset);
@@ -240,4 +283,3 @@ export class Tailer {
     return buf.toString("utf8");
   }
 }
-
