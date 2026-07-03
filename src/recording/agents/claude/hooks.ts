@@ -1,31 +1,23 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
-import { gitCmd } from "../utils/git";
-import { getWorkspaceRepoRoot } from "../utils/paths";
-import { EXTENSION_NAME } from "../utils/constants";
+import { gitCmd } from "../../../utils/git";
+import { getWorkspaceRepoRoot } from "../../../utils/paths";
+import { EXTENSION_NAME } from "../../../utils/constants";
 import {
   buildFlightRecorderHookHandler,
   ClaudeSettings,
   FLIGHT_RECORDER_HOOK_SCRIPT_RELATIVE_PATH,
   mergeFlightRecorderHooks,
-} from "./claude-hook-config";
+} from "./hook-config";
 import {
   getClaudeHookLogPathExpression,
   getConfiguredClaudeHookLogPath,
-} from "./claude-config";
+} from "./config";
 
 export type ClaudeHookSettingsScope = "local" | "project";
 
-function getHookScriptPath(repoRoot: string): string {
-  return path.join(repoRoot, FLIGHT_RECORDER_HOOK_SCRIPT_RELATIVE_PATH);
-}
-
-function getHookScriptPathExpression(repoRoot: string): string {
-  return "${CLAUDE_PROJECT_DIR}/" +
-    FLIGHT_RECORDER_HOOK_SCRIPT_RELATIVE_PATH.split(path.sep).join("/");
-}
-
+/** Writes the POSIX shell hook script that appends its stdin to a target file path given as its first argument. */
 function writeHookScript(scriptPath: string): void {
   const script = [
     "#!/bin/sh",
@@ -46,6 +38,7 @@ function writeHookScript(scriptPath: string): void {
   fs.chmodSync(scriptPath, 0o755);
 }
 
+/** Removes a hook log file left over from an old buggy config that wrote a literal `${CLAUDE_PROJECT_DIR}` directory instead of expanding it. */
 function cleanupLegacyLiteralHookPath(repoRoot: string): void {
   const legacyRoot = path.join(repoRoot, "${CLAUDE_PROJECT_DIR}");
   const legacyLogPath = path.join(
@@ -79,6 +72,7 @@ function cleanupLegacyLiteralHookPath(repoRoot: string): void {
   removeIfEmpty(legacyRoot);
 }
 
+/** Reads and parses a Claude settings JSON file, returning an empty object if it does not exist or is blank. */
 function readClaudeSettings(settingsPath: string): ClaudeSettings {
   if (!fs.existsSync(settingsPath)) {
     return {};
@@ -97,11 +91,7 @@ function readClaudeSettings(settingsPath: string): ClaudeSettings {
   return parsed as ClaudeSettings;
 }
 
-function writeClaudeSettings(settingsPath: string, settings: ClaudeSettings): void {
-  fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
-  fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n", "utf8");
-}
-
+/** Resolves the git repository's top-level directory, throwing if the folder is not a git repository. */
 async function getGitTopLevel(repoRoot: string): Promise<string> {
   const res = await gitCmd(["rev-parse", "--show-toplevel"], repoRoot);
   if (res.code !== 0 || res.out.trim().length === 0) {
@@ -111,6 +101,7 @@ async function getGitTopLevel(repoRoot: string): Promise<string> {
   return path.resolve(res.out.trim());
 }
 
+/** Appends a line to a file if it is not already present (trimmed comparison), creating the file/directory if needed. */
 function ensureLineInFile(filePath: string, line: string): void {
   const normalizedLine = line.trim();
   let existing = "";
@@ -127,6 +118,11 @@ function ensureLineInFile(filePath: string, line: string): void {
   fs.writeFileSync(filePath, existing + prefix + normalizedLine + "\n", "utf8");
 }
 
+/**
+ * Adds entries to `.git/info/exclude` for the generated hook artifacts:
+ * always the hook log (if inside the repo), plus the local settings file
+ * and hook script when using the local-only scope.
+ */
 async function ensureGitExcludeEntries(
   repoRoot: string,
   scope: ClaudeHookSettingsScope,
@@ -149,17 +145,7 @@ async function ensureGitExcludeEntries(
   }
 }
 
-function getClaudeSettingsPath(
-  repoRoot: string,
-  scope: ClaudeHookSettingsScope
-): string {
-  return path.join(
-    repoRoot,
-    ".claude",
-    scope === "local" ? "settings.local.json" : "settings.json"
-  );
-}
-
+/** Prompts the user to choose whether Claude hooks should be installed to local-only or shared project settings. */
 async function chooseScope(): Promise<ClaudeHookSettingsScope | undefined> {
   const selection = await vscode.window.showQuickPick(
     [
@@ -187,6 +173,7 @@ async function chooseScope(): Promise<ClaudeHookSettingsScope | undefined> {
   return selection?.scope;
 }
 
+/** Shows a confirmation dialog summarizing what configuring Claude hooks will change, returning whether the user confirmed. */
 async function confirmConfiguration(
   settingsPath: string,
   hookLogPath: string,
@@ -206,6 +193,7 @@ async function confirmConfiguration(
   return choice === "Configure Claude Hooks";
 }
 
+/** Shows a reminder to start a fresh Claude session after configuring hooks, since already-open chats keep stale hook state. */
 async function showPostConfigurationGuidance(): Promise<void> {
   await vscode.window.showInformationMessage(
     `${EXTENSION_NAME} configured Claude hooks. Start a new Claude chat/session in this repository before recording, because chats that were already open can continue running with the old hook state.`,
@@ -213,6 +201,13 @@ async function showPostConfigurationGuidance(): Promise<void> {
   );
 }
 
+/**
+ * Entry point for the "Configure Claude Hooks" command: writes the Flight
+ * Recorder hook script and merges its hook entries into Claude's settings,
+ * creates the hook log file, excludes generated artifacts from git when
+ * using local-only scope, and switches the workspace to the Claude
+ * hook-log integration.
+ */
 export async function configureClaudeHooks(): Promise<void> {
   const repoRoot = getWorkspaceRepoRoot(
     "Open a folder (git repo) before configuring Claude hooks."
@@ -226,9 +221,13 @@ export async function configureClaudeHooks(): Promise<void> {
     return;
   }
 
-  const settingsPath = getClaudeSettingsPath(repoRoot, scope);
+  const settingsPath = path.join(
+    repoRoot,
+    ".claude",
+    scope === "local" ? "settings.local.json" : "settings.json"
+  );
   const hookLogPath = getConfiguredClaudeHookLogPath(repoRoot);
-  const hookScriptPath = getHookScriptPath(repoRoot);
+  const hookScriptPath = path.join(repoRoot, FLIGHT_RECORDER_HOOK_SCRIPT_RELATIVE_PATH);
 
   const confirmed = await confirmConfiguration(settingsPath, hookLogPath, scope);
   if (!confirmed) {
@@ -237,7 +236,8 @@ export async function configureClaudeHooks(): Promise<void> {
 
   try {
     const handler = buildFlightRecorderHookHandler(
-      getHookScriptPathExpression(repoRoot),
+      "${CLAUDE_PROJECT_DIR}/" +
+        FLIGHT_RECORDER_HOOK_SCRIPT_RELATIVE_PATH.split(path.sep).join("/"),
       getClaudeHookLogPathExpression(repoRoot)
     );
     const existingSettings = readClaudeSettings(settingsPath);
@@ -245,7 +245,8 @@ export async function configureClaudeHooks(): Promise<void> {
 
     cleanupLegacyLiteralHookPath(repoRoot);
     writeHookScript(hookScriptPath);
-    writeClaudeSettings(settingsPath, mergedSettings);
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    fs.writeFileSync(settingsPath, JSON.stringify(mergedSettings, null, 2) + "\n", "utf8");
     fs.mkdirSync(path.dirname(hookLogPath), { recursive: true });
     if (!fs.existsSync(hookLogPath)) {
       fs.writeFileSync(hookLogPath, "", "utf8");

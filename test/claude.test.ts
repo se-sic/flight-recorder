@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ClaudeCodeParser } from "../src/recording/claude-parser";
+import { ClaudeCodeParser } from "../src/recording/agents/claude/parser";
 
 test("ClaudeCodeParser parses FileChanged hook payloads", () => {
   const parser = new ClaudeCodeParser();

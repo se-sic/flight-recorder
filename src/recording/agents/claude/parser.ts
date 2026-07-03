@@ -3,7 +3,7 @@ import {
   AssistantCapability,
   AssistantEvent,
   FileOperation,
-} from "./event";
+} from "../../event";
 
 type ClaudeHookEventPayload = {
   session_id?: string;
@@ -19,14 +19,7 @@ type ClaudeHookEventPayload = {
 
 type ClaudeTranscriptEntry = Record<string, unknown>;
 
-function maybeReadJson(line: string): unknown | null {
-  try {
-    return JSON.parse(line);
-  } catch {
-    return null;
-  }
-}
-
+/** Extracts and resolves file path strings from a tool input value, checking common path-like field names and a `file_paths` array. */
 function collectStringPaths(input: unknown): string[] {
   if (typeof input === "string" && input.trim()) {
     return [path.resolve(input)];
@@ -67,6 +60,7 @@ function collectStringPaths(input: unknown): string[] {
   return Array.from(filePaths).sort((left, right) => left.localeCompare(right));
 }
 
+/** Maps a Claude tool name to its assistant capability category (file edit, command, or generic tool call). */
 function mapToolNameToCapability(toolName: string): AssistantCapability {
   if (toolName === "Edit" || toolName === "Write" || toolName === "MultiEdit") {
     return "file-edit";
@@ -80,6 +74,7 @@ function mapToolNameToCapability(toolName: string): AssistantCapability {
   return "tool-call";
 }
 
+/** Infers file operations from a tool call's input paths, classifying the operation kind by tool name (Edit/MultiEdit -> update, Write/NotebookEdit -> unknown/update, other -> unknown). */
 function inferFileOperationsFromTool(
   toolName: string,
   toolInput: Record<string, unknown> | undefined
@@ -115,6 +110,7 @@ function inferFileOperationsFromTool(
   return fileOperations;
 }
 
+/** Maps a `FileChanged` hook payload's filesystem-watcher event type (add/unlink/change) to a file operation. */
 function mapHookFileChangedOperation(payload: ClaudeHookEventPayload): FileOperation[] {
   if (!payload.file_path) {
     return [];
@@ -133,6 +129,11 @@ function mapHookFileChangedOperation(payload: ClaudeHookEventPayload): FileOpera
   }
 }
 
+/**
+ * Maps a `PostToolUse` hook's tool response to a confirmed file operation,
+ * using the response's own file path/type fields when present, and
+ * falling back to inferring from the tool's input otherwise.
+ */
 function mapHookToolResponseOperation(
   toolResponse: Record<string, unknown> | undefined,
   fallbackToolName: string,
@@ -170,6 +171,7 @@ function mapHookToolResponseOperation(
   }
 }
 
+/** Builds an assistant event for a transcript `tool_use` block that is not a file-edit tool requiring deferred confirmation. */
 function normalizeTranscriptToolUseEvent(
   timestamp: string,
   sessionId: string | undefined,
@@ -195,6 +197,7 @@ function normalizeTranscriptToolUseEvent(
   };
 }
 
+/** Infers a file operation kind from a transcript `toolUseResult` object's shape. */
 function inferOperationKindFromToolResult(
   toolResult: Record<string, unknown>
 ): FileOperation["kind"] {
@@ -209,9 +212,11 @@ function inferOperationKindFromToolResult(
   return "unknown";
 }
 
+/** Parses Claude Code events from either hook-log JSONL payloads or transcript JSONL entries, fed incrementally as raw text chunks. */
 export class ClaudeCodeParser {
   private partialLine = "";
 
+  /** Converts one hook-log JSON payload (FileChanged, PreToolUse, PostToolUse, PostToolUseFailure) into an assistant event, or null for unhandled hook events. */
   private eventFromHookPayload(payload: ClaudeHookEventPayload): AssistantEvent | null {
     const timestamp = new Date().toISOString();
 
@@ -317,6 +322,12 @@ export class ClaudeCodeParser {
     return null;
   }
 
+  /**
+   * Converts one transcript JSONL entry into zero or more assistant
+   * events: a confirmed `edit-applied` event from a successful
+   * `toolUseResult`, plus `tool_use` content blocks (deferred for
+   * file-edit tools until their result confirms success).
+   */
   private eventFromTranscriptEntry(entry: unknown): AssistantEvent[] {
     if (typeof entry !== "object" || entry === null) {
       return [];
@@ -482,6 +493,7 @@ export class ClaudeCodeParser {
     return result;
   }
 
+  /** Feeds a raw text chunk (partial lines are buffered across calls) and yields the assistant events parsed from any complete lines. */
   *feed(chunk: string): Generator<AssistantEvent> {
     const combined = this.partialLine + chunk;
     const lines = combined.split(/\r?\n/);
@@ -493,7 +505,12 @@ export class ClaudeCodeParser {
         continue;
       }
 
-      const payload = maybeReadJson(trimmed);
+      let payload: unknown;
+      try {
+        payload = JSON.parse(trimmed);
+      } catch {
+        continue;
+      }
       if (!payload) {
         continue;
       }

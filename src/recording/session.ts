@@ -9,20 +9,22 @@ import {
   GitFailureKind,
   validateGitRecordingReadiness,
 } from "./commits";
-import { Tailer } from "./parser";
+import { Tailer } from "../utils/tailer";
 import {
+  AssistantIntegration,
   AssistantEventParser,
   AssistantIntegrationSetupAction,
-} from "./integration";
-import {
+  ASK_ON_STARTUP_INTEGRATION_ID,
   getActiveAssistantIntegration,
   getAvailableAssistantIntegrationIds,
-} from "./integrations";
+  getConfiguredIntegrationId,
+  pickAssistantIntegration,
+} from "./integration";
 import {
   FineGrainedStagingTracker,
   WindowCommit,
 } from "./staging-tracker";
-import { getClaudeSourceMode } from "./claude-config";
+import { getClaudeSourceMode } from "./agents/claude/config";
 import { getLogChannel } from "../utils/logging";
 import { getWorkspaceRepoRoot } from "../utils/paths";
 import { EXTENSION_NAME } from "../utils/constants";
@@ -52,6 +54,7 @@ let recordingStatusBarItem: vscode.StatusBarItem | null = null;
 let extensionContextRef: vscode.ExtensionContext | null = null;
 let claudeNewSessionHintShown = false;
 
+/** Resolves a `file:` scheme URI to a normalized absolute path, or null for non-file URIs. */
 function normalizeFileUri(uri: vscode.Uri): string | null {
   if (uri.scheme !== "file") {
     return null;
@@ -60,12 +63,7 @@ function normalizeFileUri(uri: vscode.Uri): string | null {
   return path.resolve(uri.fsPath);
 }
 
-function normalizePaths(paths: Iterable<string>): string[] {
-  return Array.from(
-    new Set(Array.from(paths).map((candidate) => path.resolve(candidate)))
-  ).sort((left, right) => left.localeCompare(right));
-}
-
+/** Filters out the session's own assistant log file from a set of tracked paths, so Flight Recorder never commits its own log as a human/assistant edit. */
 function filterInternalTrackingPaths(
   session: RecordingSession,
   paths: Iterable<string>
@@ -75,9 +73,12 @@ function filterInternalTrackingPaths(
     ignored.add(path.resolve(session.logFile));
   }
 
-  return normalizePaths(paths).filter((candidate) => !ignored.has(candidate));
+  return Array.from(new Set(Array.from(paths).map((candidate) => path.resolve(candidate))))
+    .sort((left, right) => left.localeCompare(right))
+    .filter((candidate) => !ignored.has(candidate));
 }
 
+/** Saves any open, dirty editor documents among the given paths, so a commit captures their current content. */
 async function saveTrackedFilesIfOpen(
   pathsToSave: Iterable<string>
 ): Promise<void> {
@@ -108,6 +109,7 @@ async function saveTrackedFilesIfOpen(
   }
 }
 
+/** Opens and attaches a log file tailer (positioned at end-of-file) to the recording session. */
 function attachLogSource(
   session: RecordingSession,
   logFile: string,
@@ -133,6 +135,11 @@ function attachLogSource(
   return true;
 }
 
+/**
+ * Saves any dirty files in a window commit, commits it, and reports the
+ * result. Stops recording and shows an error if git turns out to be
+ * unavailable. Returns whether recording was stopped.
+ */
 async function commitTrackedWindowAndReport(
   session: RecordingSession,
   commit: WindowCommit
@@ -165,6 +172,7 @@ async function commitTrackedWindowAndReport(
   return shouldStop;
 }
 
+/** Registers VS Code workspace listeners (document edits, file create/delete/rename) that feed human changes into the staging tracker. */
 function registerWorkspaceChangeTracking(
   session: RecordingSession
 ): vscode.Disposable[] {
@@ -212,6 +220,7 @@ function registerWorkspaceChangeTracking(
   ];
 }
 
+/** Updates the status bar item's text, tooltip, command, and color to reflect whether recording is active. */
 function updateRecordingStatusIndicator(active: boolean): void {
   if (!recordingStatusBarItem) {
     return;
@@ -237,6 +246,7 @@ function updateRecordingStatusIndicator(active: boolean): void {
   recordingStatusBarItem.show();
 }
 
+/** Sets the `flightRecorder.isRecording` VS Code context key, used by menu/keybinding `when` clauses. */
 async function setRecordingContext(active: boolean): Promise<void> {
   await vscode.commands.executeCommand(
     "setContext",
@@ -245,6 +255,7 @@ async function setRecordingContext(active: boolean): Promise<void> {
   );
 }
 
+/** Maps a git failure kind to a human-readable message shown to the user. */
 function gitFailureUiMessage(kind: GitFailureKind, fallback: string): string {
   switch (kind) {
     case "git_not_found":
@@ -263,6 +274,11 @@ function gitFailureUiMessage(kind: GitFailureKind, fallback: string): string {
   }
 }
 
+/**
+ * Logs a git action's result and, for failures, shows an error message the
+ * first time each failure kind occurs. Returns whether the failure is
+ * severe enough (git missing, not a repo) that recording should stop.
+ */
 function reportGitActionResult(
   result: GitActionResult,
   shownFailureKinds?: Set<GitFailureKind>
@@ -306,6 +322,7 @@ function reportGitActionResult(
   return false;
 }
 
+/** Registers the extension's status bar item and initializes it to the idle state. */
 export function initializeRecordingStatusBar(
   item: vscode.StatusBarItem
 ): void {
@@ -313,14 +330,17 @@ export function initializeRecordingStatusBar(
   updateRecordingStatusIndicator(false);
 }
 
+/** Initializes the `flightRecorder.isRecording` context key to false on activation. */
 export async function initializeRecordingContext(): Promise<void> {
   await setRecordingContext(false);
 }
 
+/** Returns whether a recording session is currently active. */
 export function isRecording(): boolean {
   return running !== null;
 }
 
+/** Resolves the configured assistant integration, showing an error and returning null if the configured ID is unknown. */
 function getConfiguredIntegrationOrShowError() {
   const integration = getActiveAssistantIntegration();
   if (integration) {
@@ -328,14 +348,29 @@ function getConfiguredIntegrationOrShowError() {
   }
 
   const availableIds = getAvailableAssistantIntegrationIds();
-  const cfg = vscode.workspace.getConfiguration("flightRecorder");
-  const configuredId = cfg.get<string>("activeIntegration", "[unset]");
+  const configuredId = getConfiguredIntegrationId();
   void vscode.window.showErrorMessage(
     `${EXTENSION_NAME} does not know the configured assistant integration "${configuredId}". Available integrations: ${availableIds.join(", ")}.`
   );
   return null;
 }
 
+/**
+ * Resolves which assistant integration to use for an upcoming recording
+ * session: prompts the user to pick one if `activeIntegration` is set to
+ * the ask-on-startup sentinel, otherwise uses the fixed configured
+ * integration.
+ */
+async function resolveIntegrationForStart(): Promise<AssistantIntegration | null> {
+  const configuredId = getConfiguredIntegrationId();
+  if (configuredId === ASK_ON_STARTUP_INTEGRATION_ID) {
+    return (await pickAssistantIntegration(configuredId)) ?? null;
+  }
+
+  return getConfiguredIntegrationOrShowError();
+}
+
+/** Prompts the user to run an integration's suggested setup action (e.g. configuring Claude hooks), if one was provided. */
 async function maybeRunIntegrationSetupAction(
   action: AssistantIntegrationSetupAction | undefined
 ): Promise<void> {
@@ -352,6 +387,7 @@ async function maybeRunIntegrationSetupAction(
   }
 }
 
+/** Shows a one-time reminder to start a fresh Claude session when hook-log recording begins, since already-open chats keep stale hook state. */
 async function maybeShowClaudeNewSessionHint(
   assistantId: string
 ): Promise<void> {
@@ -369,6 +405,12 @@ async function maybeShowClaudeNewSessionHint(
   );
 }
 
+/**
+ * Entry point for the "Start Recording" command: resolves the assistant
+ * integration and repo root, validates git readiness, prepares the
+ * integration's log source, and starts the polling loop that tails the log,
+ * feeds parsed events into the staging tracker, and commits window results.
+ */
 export async function startRecording(
   context: vscode.ExtensionContext
 ): Promise<boolean> {
@@ -378,7 +420,7 @@ export async function startRecording(
 
   extensionContextRef = context;
   const output = getLogChannel();
-  const integration = getConfiguredIntegrationOrShowError();
+  const integration = await resolveIntegrationForStart();
   if (!integration) {
     return false;
   }
@@ -529,6 +571,11 @@ export async function startRecording(
   return true;
 }
 
+/**
+ * Entry point for the "Stop Recording" command: flushes any pending human
+ * or assistant window commits, commits a final assistant-log snapshot, and
+ * optionally exports and commits chat sessions.
+ */
 export async function stopRecording(): Promise<boolean> {
   if (!running || stopping) {
     return false;
@@ -624,6 +671,7 @@ export async function stopRecording(): Promise<boolean> {
   return true;
 }
 
+/** Entry point for the "Print Assistant Log Path" command: shows the configured integration's primary log file path. */
 export async function showAssistantLogPath(
   context: vscode.ExtensionContext
 ): Promise<void> {

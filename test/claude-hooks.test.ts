@@ -5,7 +5,7 @@ import {
   FLIGHT_RECORDER_CLAUDE_HOOK_EVENTS,
   FLIGHT_RECORDER_HOOK_LOG_BASENAME,
   mergeFlightRecorderHooks,
-} from "../src/recording/claude-hook-config";
+} from "../src/recording/agents/claude/hook-config";
 
 test("mergeFlightRecorderHooks appends Flight Recorder hook rules without dropping existing hooks", () => {
   const handler = buildFlightRecorderHookHandler(
@@ -39,11 +39,7 @@ test("mergeFlightRecorderHooks appends Flight Recorder hook rules without droppi
     assert.ok(Array.isArray(merged.hooks?.[eventName]));
     assert.ok(
       merged.hooks?.[eventName].some((rule) =>
-        rule.hooks.some(
-          (hook) =>
-            hook.command === handler.command &&
-            JSON.stringify(hook.args ?? []) === JSON.stringify(handler.args ?? [])
-        )
+        rule.hooks.some((hook) => hook.command === handler.command)
       )
     );
   }
@@ -66,11 +62,7 @@ test("mergeFlightRecorderHooks is idempotent for the same command", () => {
   for (const eventName of FLIGHT_RECORDER_CLAUDE_HOOK_EVENTS) {
     const matchingRuleCount =
       twice.hooks?.[eventName].filter((rule) =>
-        rule.hooks.some(
-          (hook) =>
-            hook.command === handler.command &&
-            JSON.stringify(hook.args ?? []) === JSON.stringify(handler.args ?? [])
-        )
+        rule.hooks.some((hook) => hook.command === handler.command)
       ).length ?? 0;
     assert.equal(matchingRuleCount, 1);
   }
@@ -82,8 +74,24 @@ test("buildFlightRecorderHookHandler targets the repo-local hook log path", () =
     "${CLAUDE_PROJECT_DIR}/.claude/flight-recorder-hooks.jsonl"
   );
   assert.equal(handler.command.includes("${CLAUDE_PROJECT_DIR}"), true);
-  assert.equal(handler.args?.[0].includes("${CLAUDE_PROJECT_DIR}"), true);
-  assert.equal(handler.args?.[0].includes(FLIGHT_RECORDER_HOOK_LOG_BASENAME), true);
+  assert.equal(handler.command.includes(FLIGHT_RECORDER_HOOK_LOG_BASENAME), true);
+});
+
+test("buildFlightRecorderHookHandler embeds the target path in a single command string instead of a separate args field", () => {
+  // Claude Code hook commands are one shell command line; any "args" field
+  // on the hook entry is silently dropped and never passed to the process.
+  // Regression test for a bug where the script never received its target
+  // path argument and therefore never wrote any events to the hook log.
+  const handler = buildFlightRecorderHookHandler(
+    "${CLAUDE_PROJECT_DIR}/.claude/hooks/flight-recorder-log-hook.sh",
+    "${CLAUDE_PROJECT_DIR}/.claude/flight-recorder-hooks.jsonl"
+  );
+
+  assert.equal("args" in handler, false);
+  assert.equal(
+    handler.command,
+    '"${CLAUDE_PROJECT_DIR}/.claude/hooks/flight-recorder-log-hook.sh" "${CLAUDE_PROJECT_DIR}/.claude/flight-recorder-hooks.jsonl"'
+  );
 });
 
 test("mergeFlightRecorderHooks replaces older Flight Recorder hook definitions", () => {

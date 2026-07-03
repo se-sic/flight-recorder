@@ -48,106 +48,15 @@ The following commands can be executed from the command palette:
 Flight Recorder resolves one active assistant integration at startup through `flightRecorder.activeIntegration`.
 
 - Current built-in integrations: `github-copilot`, `claude-code`
+- Set `activeIntegration` to `askOnStartup` to be prompted for a choice each time you start recording instead of always using a fixed integration
 - The selected integration controls recording setup, primary log discovery, event parsing, and assistant-log snapshot naming.
 - The recorder core remains integration-agnostic; adding another assistant should mainly require registering another implementation of the integration contract documented in [docs/assistant-event-model.md](/Users/ben/Productivity/UDS/Hiwi Job/FlightRecorder/flight-recorder/docs/assistant-event-model.md:1).
 
-### Claude Code
+### Claude Code (Experimental)
 
-The Claude Code integration supports two official data sources:
+Claude Code support is new and less battle-tested than the Copilot integration; expect rough edges.
 
-- Local transcript JSONL files under Claude's configuration directory. Anthropic documents these under `~/.claude/projects/`, with `CLAUDE_CONFIG_DIR` as an override.
-- Structured hook payloads, if you configure Claude hooks to append their JSON stdin to a file that Flight Recorder can tail.
-
-`flightRecorder.claudeSource` controls how Flight Recorder chooses between those sources:
-
-- `auto`: prefer the configured hook log when present, otherwise use the local transcript store
-- `hookLog`: require the configured hook log
-- `transcript`: require the local transcript store
-
-`flightRecorder.claudeMissingSourceBehavior` controls what happens if the repo-specific Claude source does not exist yet, which commonly happens the first time a project is opened in VS Code before Claude has created its first session transcript:
-
-- `wait`: start recording immediately, keep tracking human edits, and attach the Claude source automatically once the hook log or transcript appears
-- `fail`: abort startup immediately and ask the user to create a Claude session first
-
-For the lowest-friction setup, run `Flight Recorder: Configure Claude Hooks`. The command:
-
-- creates or updates Claude project settings in either `.claude/settings.local.json` or `.claude/settings.json`
-- registers a broad set of hook events, including tool lifecycle hooks and file-change hooks
-- creates the hook log target directory and a repo-local hook script under `.claude/hooks/`
-- switches the current workspace to `activeIntegration = claude-code`, `claudeSource = hookLog`, and `claudeMissingSourceBehavior = wait`
-- excludes `.claude/settings.local.json` and the live hook log from git when you choose the local-only setup
-- reminds you to start a new Claude chat/session in this repo, because already-open chats can keep the old hook state
-
-If recording starts in Claude `hookLog` mode and the configured hook log does not exist yet, Flight Recorder now offers a `Configure Claude Hooks` button automatically.
-
-If Claude chat was already open before hook setup, start a new chat/session in that repository before recording. Flight Recorder also shows this reminder when Claude hook recording starts.
-
-The generated Claude hook config uses a repo-local script handler plus a hook-log path argument, for example:
-
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/flight-recorder-log-hook.sh",
-            "args": [
-              "${CLAUDE_PROJECT_DIR}/.claude/flight-recorder-hooks.jsonl"
-            ]
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/flight-recorder-log-hook.sh",
-            "args": [
-              "${CLAUDE_PROJECT_DIR}/.claude/flight-recorder-hooks.jsonl"
-            ]
-          }
-        ]
-      }
-    ],
-    "PostToolUseFailure": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/flight-recorder-log-hook.sh",
-            "args": [
-              "${CLAUDE_PROJECT_DIR}/.claude/flight-recorder-hooks.jsonl"
-            ]
-          }
-        ]
-      }
-    ],
-    "FileChanged": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/flight-recorder-log-hook.sh",
-            "args": [
-              "${CLAUDE_PROJECT_DIR}/.claude/flight-recorder-hooks.jsonl"
-            ]
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-Without custom hooks, the integration falls back to transcript parsing. That path is less precise because transcript entries are less explicit about concrete file operations than `FileChanged` hook payloads.
+Flight Recorder can track Claude Code via structured hook payloads (preferred, set by `flightRecorder.claudeSource = hookLog`) or by parsing local transcript JSONL files under `~/.claude/projects/` (`transcript`, or override the directory with `CLAUDE_CONFIG_DIR`); `auto` prefers the hook log when present. Run `Flight Recorder: Configure Claude Hooks` for the lowest-friction setup: it registers Flight Recorder's hook script in your Claude project settings, switches this workspace to `activeIntegration = claude-code` and `claudeSource = hookLog`, and reminds you to start a fresh Claude session so it picks up the new hook config. Without hooks, the integration falls back to transcript parsing, which is less precise about concrete file operations.
 
 ## Fine-Grained Staging
 

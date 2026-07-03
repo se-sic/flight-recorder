@@ -14,10 +14,11 @@ import {
   stopRecording,
   deactivateRecording,
 } from "./recording/session";
-import { configureClaudeHooks } from "./recording/claude-hooks";
+import { configureClaudeHooks } from "./recording/agents/claude/hooks";
 import { COMMAND_STATUS, EXTENSION_NAME } from "./utils/constants";
 import { initializeLogChannel } from "./utils/logging";
 
+/** Extension activation entry point: sets up logging, the recording status bar item, and registers all commands. */
 export function activate(context: vscode.ExtensionContext) {
   // Initialize global logging channel
   const outputChannel = initializeLogChannel(EXTENSION_NAME);
@@ -108,6 +109,7 @@ export function activate(context: vscode.ExtensionContext) {
   );
 }
 
+/** Extension deactivation entry point: tears down the edit history visualization and stops any active recording. */
 export async function deactivate() {
   disposeEditHistoryVisualization();
   await deactivateRecording();

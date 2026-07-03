@@ -8,6 +8,7 @@ export type ChatExportResult =
   | { ok: true; count: number; destDir: string }
   | { ok: false; msg: string };
 
+/** Lists file (not directory) names in a directory, returning an empty list if the directory can't be read. */
 export async function safeReadDirFilesOnly(dir: string): Promise<string[]> {
   try {
     const entries = await fs.promises.readdir(dir, { withFileTypes: true });
@@ -19,6 +20,10 @@ export async function safeReadDirFilesOnly(dir: string): Promise<string[]> {
   }
 }
 
+/**
+ * Copies the current workspace's chat session files from VS Code's
+ * per-workspace storage into the repository under `.chat-log`.
+ */
 export async function exportCurrentWorkspaceChats(
   context: vscode.ExtensionContext,
   repoRoot: string

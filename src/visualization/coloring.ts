@@ -44,6 +44,7 @@ export type PaletteResult =
 
 // --- Rank-based palette ---
 
+/** Maps a commit's rank within a total ordering to a decoration palette sampled from a sequential color scale. */
 export function rankPalette(
   rank: number,
   total: number,
@@ -68,6 +69,7 @@ export function rankPalette(
 
 // --- Event-origin palette ---
 
+/** Infers the assistant-event origin kind from the `"origin"` fields embedded in a commit summary/body. */
 export function eventOriginFromSummary(body: string): EventOriginKind {
   const origins = new Set<string>();
   const pattern = /"origin"\s*:\s*"([^"]+)"/g;
@@ -88,6 +90,7 @@ export function eventOriginFromSummary(body: string): EventOriginKind {
   return "unknown";
 }
 
+/** Returns the human-readable label for an event origin kind. */
 export function eventOriginLabel(kind: EventOriginKind): string {
   switch (kind) {
     case "agent-edit": return "Agent edit";
@@ -97,6 +100,7 @@ export function eventOriginLabel(kind: EventOriginKind): string {
   }
 }
 
+/** Maps an event origin kind to its decoration palette in the given qualitative color scheme. */
 export function eventOriginPalette(
   kind: EventOriginKind,
   isDark: boolean,
@@ -123,6 +127,7 @@ export function eventOriginPalette(
 
 // --- Per-mode palette computation ---
 
+/** Computes a per-commit decoration palette for "file history" coloring mode, ranked by this file's edit order. */
 export function computeFilePalettes(
   commitAgeEntries: ReturnType<typeof buildCommitAgeEntriesFromRanges>,
   isDark: boolean,
@@ -139,6 +144,11 @@ export function computeFilePalettes(
 
 const globalColorRankCache = new Map<string, Map<string, { rank: number; total: number }>>();
 
+/**
+ * Fetches (and caches per repo) the repository-wide commit order via `git
+ * rev-list --all --reverse`, used to rank commits for "global history"
+ * coloring mode across all files, not just the active one.
+ */
 async function fetchGlobalColorRanks(
   repoRoot: string,
   forceRefresh = false
@@ -176,6 +186,11 @@ async function fetchGlobalColorRanks(
   return { ok: true, ranks };
 }
 
+/**
+ * Computes a per-commit decoration palette for "global history" coloring
+ * mode, ranked by each commit's position across the entire repository
+ * (refreshing the cached rank table if a needed commit is missing from it).
+ */
 export async function computeGlobalPalettes(
   repoRoot: string,
   commitAgeEntries: ReturnType<typeof buildCommitAgeEntriesFromRanges>,
@@ -208,6 +223,7 @@ export async function computeGlobalPalettes(
   return { ok: true, paletteByCommit, kindByCommit: null };
 }
 
+/** Computes a per-commit decoration palette for "event type" coloring mode, keyed by inferred event origin. */
 export function computeEventPalettes(
   commitAgeEntries: ReturnType<typeof buildCommitAgeEntriesFromRanges>,
   isDark: boolean,

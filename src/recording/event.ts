@@ -15,12 +15,7 @@ export type AssistantEventKind =
   | "response-produced"
   | "unknown";
 
-export type FileOperationKind =
-  | "create"
-  | "update"
-  | "delete"
-  | "rename"
-  | "unknown";
+export type FileOperationKind = "create" | "update" | "delete" | "unknown";
 
 export type CursorPosition = {
   line: number;
@@ -29,9 +24,7 @@ export type CursorPosition = {
 
 export type FileOperation = {
   kind: FileOperationKind;
-  path?: string;
-  oldPath?: string;
-  newPath?: string;
+  path: string;
 };
 
 export type AssistantSource = {
@@ -53,28 +46,21 @@ export type AssistantEvent = {
   metadata?: Record<string, unknown>;
 };
 
+/** Resolves a path to a normalized absolute form. */
 function normalizeFilePath(candidate: string): string {
   return path.resolve(candidate);
 }
 
+/** Collects the sorted, deduplicated, absolute file paths touched by an assistant event's file operations. */
 export function collectEventFilePaths(ev: AssistantEvent): string[] {
-  const filePaths = new Set<string>();
-
-  for (const operation of ev.fileOperations) {
-    if (operation.path) {
-      filePaths.add(normalizeFilePath(operation.path));
-    }
-    if (operation.oldPath) {
-      filePaths.add(normalizeFilePath(operation.oldPath));
-    }
-    if (operation.newPath) {
-      filePaths.add(normalizeFilePath(operation.newPath));
-    }
-  }
+  const filePaths = new Set(
+    ev.fileOperations.map((operation) => normalizeFilePath(operation.path))
+  );
 
   return Array.from(filePaths).sort((left, right) => left.localeCompare(right));
 }
 
+/** Returns an event's touched file paths relative to the repo root (or absolute if no repo root is given, or a placeholder if none fall under it). */
 function relativePathsForEvent(
   ev: AssistantEvent,
   repoRoot?: string
@@ -93,36 +79,26 @@ function relativePathsForEvent(
   return relFiles.length > 0 ? relFiles : ["<file-outside-repo>"];
 }
 
+/** Formats a single file operation's path for output: relative to the repo root when it falls under it, otherwise absolute. */
 function formatFileOperation(
   operation: FileOperation,
   repoRoot?: string
 ): FileOperation {
-  const normalizeForOutput = (candidate?: string): string | undefined => {
-    if (!candidate) {
-      return undefined;
-    }
+  const absolute = normalizeFilePath(operation.path);
+  if (!repoRoot) {
+    return { kind: operation.kind, path: absolute };
+  }
 
-    if (!repoRoot) {
-      return normalizeFilePath(candidate);
-    }
+  const absRepo = path.resolve(repoRoot);
+  const formattedPath =
+    absolute === absRepo || absolute.startsWith(absRepo + path.sep)
+      ? path.relative(repoRoot, absolute).split(path.sep).join("/")
+      : absolute;
 
-    const absolute = normalizeFilePath(candidate);
-    const absRepo = path.resolve(repoRoot);
-    if (absolute === absRepo || absolute.startsWith(absRepo + path.sep)) {
-      return path.relative(repoRoot, absolute).split(path.sep).join("/");
-    }
-
-    return absolute;
-  };
-
-  return {
-    kind: operation.kind,
-    path: normalizeForOutput(operation.path),
-    oldPath: normalizeForOutput(operation.oldPath),
-    newPath: normalizeForOutput(operation.newPath),
-  };
+  return { kind: operation.kind, path: formattedPath };
 }
 
+/** Serializes an assistant event to the JSON line format used in commit messages, with repo-relative file paths. */
 export function formatAssistantEventJson(
   ev: AssistantEvent,
   repoRoot?: string

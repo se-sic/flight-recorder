@@ -1,7 +1,6 @@
 export type ClaudeHookCommand = {
   type: "command";
   command: string;
-  args?: string[];
 };
 
 export type ClaudeHookRule = {
@@ -51,6 +50,7 @@ export const FLIGHT_RECORDER_HOOK_SCRIPT_RELATIVE_PATH =
 export const FLIGHT_RECORDER_HOOK_LOG_BASENAME =
   "flight-recorder-hooks.jsonl";
 
+/** Escapes a string for safe embedding inside a double-quoted POSIX shell argument. */
 export function escapeForDoubleQuotes(value: string): string {
   return value
     .replace(/\\/g, "\\\\")
@@ -58,25 +58,26 @@ export function escapeForDoubleQuotes(value: string): string {
     .replace(/`/g, "\\`");
 }
 
+/**
+ * Claude Code hook commands are a single shell command line, not a
+ * program+args pair: any "args" field is silently dropped, so the target
+ * path must be embedded (and quoted) inside the command string itself.
+ */
 export function buildFlightRecorderHookHandler(
   scriptPathExpression: string,
   targetPathExpression: string
 ): ClaudeHookCommand {
   return {
     type: "command",
-    command: scriptPathExpression,
-    args: [targetPathExpression],
+    command: `"${escapeForDoubleQuotes(scriptPathExpression)}" "${escapeForDoubleQuotes(targetPathExpression)}"`,
   };
 }
 
-function isFlightRecorderHookCommand(hook: ClaudeHookCommand): boolean {
-  return (
-    hook.command.includes("flight-recorder-log-hook.sh") ||
-    hook.command.includes(FLIGHT_RECORDER_HOOK_LOG_BASENAME) ||
-    (hook.args ?? []).some((arg) => arg.includes(FLIGHT_RECORDER_HOOK_LOG_BASENAME))
-  );
-}
-
+/**
+ * Merges the Flight Recorder hook handler into a Claude settings object for
+ * every tracked hook event, replacing any previously installed Flight
+ * Recorder hook entries while preserving unrelated existing hooks/settings.
+ */
 export function mergeFlightRecorderHooks(
   settings: ClaudeSettings,
   handler: ClaudeHookCommand
@@ -95,7 +96,11 @@ export function mergeFlightRecorderHooks(
       ? hooks[eventName]
           .map((rule) => ({
             ...rule,
-            hooks: rule.hooks.filter((hook) => !isFlightRecorderHookCommand(hook)),
+            hooks: rule.hooks.filter(
+              (hook) =>
+                !hook.command.includes("flight-recorder-log-hook.sh") &&
+                !hook.command.includes(FLIGHT_RECORDER_HOOK_LOG_BASENAME)
+            ),
           }))
           .filter((rule) => rule.hooks.length > 0)
       : [];

@@ -1,17 +1,11 @@
 import * as fs from "fs";
 import * as path from "path";
 import {
-  AssistantEvent,
-  collectEventFilePaths,
-  formatAssistantEventJson,
-} from "./event";
-import {
   formatWindowCommitMessage,
   WindowCommit,
 } from "./staging-tracker";
 import { gitCmd, GitCommandResult } from "../utils/git";
 import { LOG_EXPORT_PATH } from "../utils/paths";
-import { EXTENSION_NAME } from "../utils/constants";
 
 export type GitFailureKind =
   | "git_not_found"
@@ -37,6 +31,7 @@ export type GitValidationResult =
   | { ok: false; kind: GitFailureKind; msg: string; err: string };
 
 
+/** Returns whether a failed git command result was caused by git not being installed/found. */
 function isGitNotFoundResult(res: GitCommandResult): boolean {
   if (!res.spawnError) {
     return false;
@@ -46,15 +41,7 @@ function isGitNotFoundResult(res: GitCommandResult): boolean {
   return nodeErr.code === "ENOENT";
 }
 
-function isIdentityNotConfiguredText(text: string): boolean {
-  return (
-    text.includes("Please tell me who you are") ||
-    text.includes("unable to auto-detect email address") ||
-    text.includes("git config --global user.email") ||
-    text.includes("git config --global user.name")
-  );
-}
-
+/** Classifies a failed git command result into a specific failure kind and message for the given operation stage. */
 function classifyGitFailure(
   stage: "run" | "add" | "commit" | "validate",
   res: GitCommandResult,
@@ -78,7 +65,12 @@ function classifyGitFailure(
     };
   }
 
-  if (stage === "commit" && isIdentityNotConfiguredText(combined)) {
+  const isIdentityNotConfiguredText =
+    combined.includes("Please tell me who you are") ||
+    combined.includes("unable to auto-detect email address") ||
+    combined.includes("git config --global user.email") ||
+    combined.includes("git config --global user.name");
+  if (stage === "commit" && isIdentityNotConfiguredText) {
     return {
       kind: "identity_not_configured",
       msg: "Git user.name and/or user.email are not configured.",
@@ -98,6 +90,7 @@ function classifyGitFailure(
   };
 }
 
+/** Reads the resolved author or committer identity git would use for a commit in this repo. */
 async function readGitIdent(
   repoRoot: string,
   key: "GIT_AUTHOR_IDENT" | "GIT_COMMITTER_IDENT"
@@ -178,6 +171,7 @@ export async function validateGitRecordingReadiness(
   return { ok: true };
 }
 
+/** Extracts file paths from `git status --porcelain` output, using the new-name side of renames. */
 function parsePorcelainNames(porcelain: string): string[] {
   // status --porcelain lines look like:
   // " M path", "?? path", "A  path", "R  old -> new" etc.
@@ -203,6 +197,7 @@ function parsePorcelainNames(porcelain: string): string[] {
   return names;
 }
 
+/** Lists every changed (tracked or untracked) file path in the repo's working tree. */
 export async function listAllChangedFiles(repoRoot: string): Promise<string[]> {
   const st = await gitCmd(["status", "--porcelain"], repoRoot);
   if (st.code !== 0) {
@@ -211,6 +206,7 @@ export async function listAllChangedFiles(repoRoot: string): Promise<string[]> {
   return parsePorcelainNames(st.out);
 }
 
+/** Returns whether a file differs from HEAD in the working tree, or is untracked. */
 export async function fileHasChanges(
   repoRoot: string,
   rel: string
@@ -235,19 +231,11 @@ export async function fileHasChanges(
   return false;
 }
 
-function getAssistantCommitMessage(
-  repoRoot: string,
-  evs: AssistantEvent[]
-): string {
-  const header = evs.length === 1
-    ? `${EXTENSION_NAME}: ${evs[0].source.assistantId} ${evs[0].kind}`
-    : `${EXTENSION_NAME}: ${evs.length} events`;
-  const perEventMessages = evs.map((ev) =>
-    formatAssistantEventJson(ev, repoRoot)
-  );
-  return [header, ...perEventMessages].join("\n");
-}
-
+/**
+ * Stages the given files (or all changes, if `addAll`/no files given) and
+ * creates a commit with the given message. In dry-run mode, reports what
+ * would be staged and committed without touching the repository.
+ */
 async function stageAndCommit(
   repoRoot: string,
   msg: string,
@@ -369,41 +357,7 @@ async function stageAndCommit(
   return { ok: true, skipped: false, msg, err: res.err };
 }
 
-export async function commitForEvent(
-  repoRoot: string,
-  ev: AssistantEvent,
-  addAll: boolean,
-  allowEmpty: boolean,
-  dryRun: boolean
-): Promise<GitActionResult> {
-  return commitForEvents(repoRoot, [ev], addAll, allowEmpty, dryRun);
-}
-
-export async function commitForEvents(
-  repoRoot: string,
-  evs: AssistantEvent[],
-  addAll: boolean,
-  allowEmpty: boolean,
-  dryRun: boolean
-): Promise<GitActionResult> {
-  if (evs.length === 0) {
-    return { ok: false, skipped: true, msg: "No events to commit" };
-  }
-
-  const absRepo = path.resolve(repoRoot);
-  const allAbsPaths = Array.from(
-    new Set(
-      evs.flatMap((ev) => collectEventFilePaths(ev)).map((p) => path.resolve(p))
-    )
-  );
-  const relFiles = allAbsPaths
-    .filter((abs) => abs === absRepo || abs.startsWith(absRepo + path.sep))
-    .map((abs) => path.relative(repoRoot, abs));
-  const msg = getAssistantCommitMessage(repoRoot, evs);
-  const lastTs = evs[evs.length - 1].timestamp;
-  return stageAndCommit(repoRoot, msg, lastTs, relFiles, addAll, allowEmpty, dryRun);
-}
-
+/** Stages a window commit's files and commits them with a message built from the window's metadata and events. */
 export async function commitTrackedWindow(
   repoRoot: string,
   commit: WindowCommit,
@@ -427,7 +381,7 @@ export async function commitTrackedWindow(
 }
 
 /**
- * Copies the current Copilot logfile into the repository, stages it, and
+ * Copies the current assistant logfile into the repository, stages it, and
  * creates a final shutdown commit so the raw session log is preserved.
  */
 export async function commitAssistantLogSnapshot(
@@ -458,7 +412,7 @@ export async function commitAssistantLogSnapshot(
     };
   }
 
-  // Persist a timestamped copy of the current Copilot logfile inside the repo.
+  // Persist a timestamped copy of the current assistant logfile inside the repo.
   fs.mkdirSync(path.dirname(absSnapshotPath), { recursive: true });
   const rawLogContent = fs.readFileSync(sourceLogFile, "utf8");
   fs.writeFileSync(absSnapshotPath, rawLogContent, "utf8");

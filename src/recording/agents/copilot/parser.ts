@@ -1,16 +1,16 @@
-import * as fs from "fs";
 import * as path from "path";
 import { URL } from "url";
 import {
   AssistantEvent,
   FileOperation,
-} from "./event";
+} from "../../event";
 
 const TS_RE = /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}) \[(\w+)\] \[([^\]]+)\] (.*)$/;
 const ACCEPTED_RE = /\bghostText\.accepted\b(?:.*\bchoiceIndex:\s*(\d+)\b)?/;
 const GET_COMPLETIONS_FILE_RE = /\bRequesting for\s+(file:\/\/\S+)/;
 const GET_COMPLETIONS_LOCATION_RE = /\bat\s+(\d+):(\d+)\b/;
 
+/** Converts a `file://` URI to a filesystem path (stripping the leading slash on Windows drive paths), or returns the input unchanged if it's not a valid file URI. */
 export function fileUriToPath(uri: string): string {
   try {
     const u = new URL(uri);
@@ -31,12 +31,14 @@ export function fileUriToPath(uri: string): string {
   }
 }
 
+/** Parses GitHub Copilot Chat events (agent edit-tool patches and inline completion acceptances) from its debug log text, fed incrementally as raw chunks. */
 export class CopilotLogParser {
   private lastRequestedFileUri: string | null = null;
   private lastRequestedCursorLine: number | null = null;
   private lastRequestedCursorColumn: number | null = null;
   private partialLine = "";
 
+  /** Extracts the edit-tool payload JSON and request ID from a log line's tag/message, whichever of the two known formats it uses. */
   private getEditToolPayload(tag: string, msg: string): { payload: string; requestId: string } | null {
     if (tag.startsWith("edit-tool:")) {
       return { payload: msg, requestId: tag.slice("edit-tool:".length) };
@@ -46,6 +48,13 @@ export class CopilotLogParser {
     return match ? { requestId: match[1], payload: match[2] } : null;
   }
 
+  /**
+   * Extracts file operations from an edit-tool entry's input, which
+   * different Copilot models emit in different shapes: a "*** Begin
+   * Patch"-style string (parsed via regex), an object with explicit
+   * path-like fields, or (as a last resort) any object whose string
+   * values look like file paths.
+   */
   private collectEditToolFileOperations(input: unknown): FileOperation[] {
     const operations: FileOperation[] = [];
 
@@ -106,23 +115,12 @@ export class CopilotLogParser {
     return operations;
   }
 
-  private getInlinePayload(tag: string, msg: string): string | null {
-    if (tag !== "postInsertion") {
-      return null;
-    }
-
-    return msg;
-  }
-
-  // Agent edit-tool logs are explicit patch operations and must never be treated
-  // as inline completions. Each patch entry is emitted as one event that can
-  // include multiple files via files.
-  //
-  // Different LLM models emit different payload formats:
-  // - Some produce string payloads with "*** Begin Patch" format (extract files from regex)
-  // - Others produce object payloads with {filePath, oldString, newString} (extract filePath directly)
-  // - Fallback: search any object for string values that look like file paths
-  // The parser adapts transparently; unrecognized formats are gracefully skipped.
+  /**
+   * Yields one `edit-applied` event per edit-tool patch entry. Agent
+   * edit-tool logs are explicit patch operations and must never be
+   * treated as inline completions; unrecognized entry formats are
+   * gracefully skipped rather than erroring.
+   */
   private *parseEditToolEvents(ts: string, msg: string, requestId: string): Generator<AssistantEvent> {
     let payload: unknown;
     try {
@@ -161,6 +159,7 @@ export class CopilotLogParser {
     }
   }
 
+  /** Yields a `suggestion-accepted` event when the message reports an accepted ghost-text completion, using the most recently requested file/cursor position. */
   private *parseInlineEvents(ts: string, msg: string): Generator<AssistantEvent> {
     const acceptedMatch = ACCEPTED_RE.exec(msg);
     if (!acceptedMatch) {
@@ -199,6 +198,7 @@ export class CopilotLogParser {
     yield ev;
   }
 
+  /** Feeds a raw log text chunk (partial lines are buffered across calls) and yields the assistant events parsed from any complete lines. */
   *feed(chunk: string): Generator<AssistantEvent> {
     const combined = this.partialLine + chunk;
     const lines = combined.split(/\r?\n/);
@@ -233,53 +233,9 @@ export class CopilotLogParser {
         }
       }
 
-      const inlinePayload = this.getInlinePayload(tag, msg);
-      if (inlinePayload) {
-        yield* this.parseInlineEvents(ts, inlinePayload);
+      if (tag === "postInsertion") {
+        yield* this.parseInlineEvents(ts, msg);
       }
     }
-  }
-}
-
-export class Tailer {
-  private fd: number | null = null;
-  private offset = 0;
-
-  constructor(private filePath: string) {}
-
-  startFromEnd() {
-    const st = fs.statSync(this.filePath);
-    this.offset = st.size;
-  }
-
-  open() {
-    this.fd = fs.openSync(this.filePath, "r");
-  }
-
-  close() {
-    if (this.fd !== null) {
-      fs.closeSync(this.fd);
-    }
-    this.fd = null;
-  }
-
-  readNew(): string {
-    if (this.fd === null) {
-      return "";
-    }
-    const st = fs.statSync(this.filePath);
-    if (st.size < this.offset) {
-      // rotated/truncated
-      this.offset = 0;
-    }
-    const len = st.size - this.offset;
-    if (len <= 0) {
-      return "";
-    }
-
-    const buf = Buffer.alloc(len);
-    fs.readSync(this.fd, buf, 0, len, this.offset);
-    this.offset = st.size;
-    return buf.toString("utf8");
   }
 }

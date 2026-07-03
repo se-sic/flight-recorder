@@ -3,13 +3,20 @@ import { CopilotLogParser } from "./parser";
 import {
   AssistantIntegration,
   AssistantIntegrationReady,
-} from "./integration";
+} from "../../integration";
 import {
   getCopilotLogFile,
   getWindowLogDirFromContext,
-} from "../utils/paths";
-import { getLogChannel } from "../utils/logging";
+} from "../../../utils/paths";
+import { getLogChannel } from "../../../utils/logging";
 
+/**
+ * Enables debug-level logging for the GitHub Copilot Chat extension: sets
+ * its default log level to Debug, then discovers and invokes the VS Code
+ * commands needed to raise the currently active output channel's log
+ * level, since Copilot's edit-tool and inline-completion signals are only
+ * emitted at debug level.
+ */
 async function enableCopilotDebugLogging(): Promise<
   | { ok: true }
   | { ok: false; msg: string; err?: string }
@@ -105,11 +112,13 @@ async function enableCopilotDebugLogging(): Promise<
   }
 }
 
+/** Assistant integration for GitHub Copilot Chat, sourcing events by tailing its extension-host debug log file. */
 export class CopilotIntegration implements AssistantIntegration {
   readonly assistantId = "github-copilot";
   readonly displayName = "GitHub Copilot";
   readonly logSnapshotPrefix = "copilot";
 
+  /** Locates the Copilot log file and enables debug logging for it, returning it ready to tail or a failure if either step fails. */
   async prepareRecording(
     context: vscode.ExtensionContext,
     _repoRoot: string
@@ -145,6 +154,7 @@ export class CopilotIntegration implements AssistantIntegration {
     };
   }
 
+  /** Returns the currently discoverable Copilot log file path, or null if the window log directory or log file can't be found. */
   async showPrimaryLogPath(
     context: vscode.ExtensionContext,
     _repoRoot: string

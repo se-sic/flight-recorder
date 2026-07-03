@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import * as path from "path";
-import { CopilotLogParser } from "../src/recording/parser";
+import { CopilotLogParser } from "../src/recording/agents/copilot/parser";
 
 const SAMPLE_LINE =
   "2026-04-28 10:12:56.872 [debug] [edit-tool:efcf0ac7-59d2-4c9b-b0d4-4d84a23ce134] " +

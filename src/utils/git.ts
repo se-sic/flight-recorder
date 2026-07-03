@@ -7,6 +7,7 @@ export type GitCommandResult = {
   spawnError?: Error;
 };
 
+/** Runs `git` with the given arguments in `cwd` and collects its exit code, stdout, and stderr. */
 export function gitCmd(
   args: string[],
   cwd: string

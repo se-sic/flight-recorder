@@ -8,7 +8,7 @@
 		"type": "git",
 		"url": "https://github.com/se-sic/flight-recorder"
 	},
-  "version": "0.2.3",
+  "version": "0.3.0",
   "activationEvents": [
     "onStartupFinished"
   ],
@@ -78,9 +78,15 @@
           "type": "string",
           "enum": [
             "github-copilot",
-            "claude-code"
+            "claude-code",
+            "askOnStartup"
           ],
-          "default": "claude-code",
+          "enumDescriptions": [
+            "Always record GitHub Copilot.",
+            "Always record Claude Code.",
+            "Prompt for which assistant to monitor each time recording starts."
+          ],
+          "default": "github-copilot",
           "description": "Selects which assistant integration Flight Recorder uses for recording and primary log discovery."
         },
         "flightRecorder.claudeSource": {

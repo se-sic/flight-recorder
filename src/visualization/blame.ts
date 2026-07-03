@@ -50,6 +50,7 @@ type Token = {
   end: number;
 };
 
+/** Returns whether a failed git command result was caused by git not being installed/found. */
 function isGitNotFoundResult(res: GitCommandResult): boolean {
   if (!res.spawnError) {
     return false;
@@ -59,6 +60,7 @@ function isGitNotFoundResult(res: GitCommandResult): boolean {
   return nodeErr.code === "ENOENT";
 }
 
+/** Classifies a failed git command result into a user-facing failure kind and message. */
 export function classifyVisualizationGitFailure(
   res: GitCommandResult,
   fallbackMsg: string
@@ -88,6 +90,7 @@ export function classifyVisualizationGitFailure(
   };
 }
 
+/** Splits text into lines, normalizing CRLF to LF first. Returns an empty array for empty text. */
 function splitLines(text: string): string[] {
   if (text.length === 0) {
     return [];
@@ -96,18 +99,14 @@ function splitLines(text: string): string[] {
   return text.replace(/\r\n/g, "\n").split("\n");
 }
 
+/**
+ * Splits text into whitespace runs, identifier/number-like runs, and single
+ * characters. Token-level attribution is the compromise between "too coarse"
+ * (whole-line blame) and "too noisy" (character-by-character provenance): it
+ * lets later edits replace just a variable name, operator, or punctuation
+ * while preserving neighboring text from older commits when unchanged.
+ */
 function tokenize(text: string): Token[] {
-  // Token-level attribution is the current compromise between "too coarse"
-  // (whole-line blame) and "too noisy" (character-by-character provenance).
-  //
-  // We split into:
-  // - whitespace runs
-  // - identifier/number-like runs
-  // - every remaining single character
-  //
-  // This lets later edits replace just meaningful parts of a line such as a
-  // variable name, operator, or punctuation while preserving neighboring text
-  // from older commits when it survives unchanged.
   const tokens: Token[] = [];
   const matches = text.matchAll(/\s+|[A-Za-z0-9_]+|./g);
 
@@ -124,6 +123,7 @@ function tokenize(text: string): Token[] {
   return tokens;
 }
 
+/** Merges consecutive spans that share the same commit into a single span, dropping empty spans. */
 function mergeAdjacentSpans(spans: AttributedSpan[]): AttributedSpan[] {
   const merged: AttributedSpan[] = [];
 
@@ -144,6 +144,7 @@ function mergeAdjacentSpans(spans: AttributedSpan[]): AttributedSpan[] {
   return merged;
 }
 
+/** Builds an attributed line whose entire text is owned by a single commit. */
 function createFullLineOwnership(
   text: string,
   commitHash: string
@@ -153,6 +154,7 @@ function createFullLineOwnership(
   };
 }
 
+/** Slices a span list to the [start, end) character range, splitting spans at the boundaries as needed. */
 function sliceLineSpans(
   spans: AttributedSpan[],
   start: number,
@@ -189,17 +191,18 @@ function sliceLineSpans(
   return mergeAdjacentSpans(result);
 }
 
+/**
+ * Core diff primitive used for both token-level and sequence-level matching:
+ * builds the longest-common-subsequence length matrix for every suffix pair
+ * of `left`/`right`. Backtracking prefers "equal" steps whenever possible, so
+ * unchanged tokens keep their previous commit attribution while only
+ * inserted/replaced tokens are reassigned.
+ */
 function buildLcsMatrix<T>(
   left: T[],
   right: T[],
   isEqual: (a: T, b: T) => boolean
 ): number[][] {
-  // Core diff primitive used for both token-level and sequence-level matching.
-  //
-  // The matrix stores the length of the longest common subsequence from each
-  // pair of suffixes. During backtracking we prefer "equal" steps whenever
-  // possible, which means unchanged tokens keep their previous commit
-  // attribution while only inserted/replaced tokens are reassigned.
   const matrix = Array.from({ length: left.length + 1 }, () =>
     Array<number>(right.length + 1).fill(0)
   );
@@ -222,22 +225,18 @@ type DiffOp<T> =
   | { type: "delete"; left: T }
   | { type: "insert"; right: T };
 
+/**
+ * Converts the LCS matrix into a simple edit script of equal/insert/delete
+ * ops. For provenance: "equal" keeps attribution from the old text, "insert"
+ * assigns attribution to the newer commit, and "delete" drops the removed
+ * text entirely. A replacement naturally appears as a delete+insert pair, so
+ * no separate "replace" op is needed.
+ */
 function diffSequence<T>(
   left: T[],
   right: T[],
   isEqual: (a: T, b: T) => boolean
 ): DiffOp<T>[] {
-  // Convert the LCS matrix into a simple edit script.
-  //
-  // Important for provenance:
-  // - "equal"  => keep attribution from the old text
-  // - "insert" => assign attribution to the newer commit
-  // - "delete" => removed text disappears from the final file entirely
-  //
-  // We do not need a separate "replace" op here. A replacement appears as a
-  // delete+insert pair, which is exactly what we want for provenance because
-  // the removed tokens should vanish and the inserted tokens should belong to
-  // the newer commit.
   const matrix = buildLcsMatrix(left, right, isEqual);
   const ops: DiffOp<T>[] = [];
   let i = 0;
@@ -273,35 +272,25 @@ function diffSequence<T>(
   return ops;
 }
 
+/**
+ * The key within-line attribution step: given the old line (already split
+ * into spans each carrying the commit that last introduced that text) and
+ * the new textual content of the line, builds a new span list where
+ * unchanged tokens inherit their old commit ownership and newly
+ * inserted/replaced tokens are owned by `commitHash`.
+ *
+ * Example: old `"const total = value;"` (all owned by commit A) becomes
+ * `"const total = newValue;"` in commit B, producing spans
+ * `"const total = "` -> A, `"newValue"` -> B, `";"` -> A.
+ *
+ * This is reconstructed provenance inferred from adjacent snapshots, not a
+ * Git-native truth source.
+ */
 export function mergeLineAttribution(
   previousLine: AttributedLine,
   nextText: string,
   commitHash: string
 ): AttributedLine {
-  // This is the key within-line attribution step.
-  //
-  // Input:
-  // - previousLine: the old line, already split into spans that each carry the
-  //   commit that last introduced that piece of text
-  // - nextText: the new textual content of the line in the next snapshot
-  // - commitHash: the commit responsible for this snapshot transition
-  //
-  // Goal:
-  // Build a new span list for the final line such that:
-  // - unchanged tokens inherit their old commit ownership
-  // - newly inserted/replaced tokens are owned by the current commit
-  //
-  // Example:
-  //   old: "const total = value;"   (all owned by commit A)
-  //   new: "const total = newValue;" in commit B
-  //
-  // Result:
-  //   "const total = " -> A
-  //   "newValue"       -> B
-  //   ";"              -> A
-  //
-  // This is reconstructed provenance, not a Git-native truth source. It is an
-  // inference from adjacent snapshots.
   const previousText = previousLine.spans.map((span) => span.text).join("");
   if (previousText === nextText) {
     return previousLine;
@@ -336,10 +325,12 @@ export function mergeLineAttribution(
   };
 }
 
+/**
+ * Extracts hunk line-range coordinates from unified diff text. Only the
+ * coordinates are needed (not the patch body) because the actual text for
+ * each side comes from complete file snapshots.
+ */
 function parseDiffHunks(diffText: string): DiffHunk[] {
-  // We only need hunk coordinates, not the full patch body, because the actual
-  // text for each side comes from complete file snapshots. The hunk metadata is
-  // enough to tell us which line intervals changed between two revisions.
   const lines = diffText.split(/\r?\n/);
   const hunks: DiffHunk[] = [];
   const hunkRe = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
@@ -361,24 +352,21 @@ function parseDiffHunks(diffText: string): DiffHunk[] {
   return hunks;
 }
 
+/**
+ * Applies provenance to one changed diff block. Pure insertions belong
+ * entirely to `commitHash`; pure deletions disappear; line-for-line
+ * replacements merge each old/new pair via {@link mergeLineAttribution} so
+ * unchanged tokens keep their old owner. On a block length mismatch, as many
+ * lines as possible are paired and any extra new lines are treated as fresh
+ * lines owned by the current commit — an intentionally approximate
+ * first-pass reconstruction for larger edits, avoiding a heavier
+ * whole-block alignment algorithm.
+ */
 function applyChangedBlock(
   previousBlock: AttributedLine[],
   nextBlock: string[],
   commitHash: string
 ): AttributedLine[] {
-  // Apply provenance to one changed diff block.
-  //
-  // Cases:
-  // - pure insertion: all new lines belong to the current commit
-  // - pure deletion: block disappears from the final file
-  // - line-for-line replacement: merge each old/new line pair with
-  //   mergeLineAttribution so unchanged tokens survive with their old owner
-  // - old/new block length mismatch: pair as many lines as possible, then treat
-  //   extra new lines as fresh lines owned by the current commit
-  //
-  // The last case is intentionally approximate. It gives a stable first-pass
-  // reconstruction for larger edits without introducing a much heavier
-  // alignment algorithm across whole changed blocks.
   if (previousBlock.length === 0) {
     return nextBlock.map((line) => createFullLineOwnership(line, commitHash));
   }
@@ -403,22 +391,20 @@ function applyChangedBlock(
   return merged;
 }
 
+/**
+ * Replays one revision transition over the current attribution state.
+ * `previousLines` already represents the file after all earlier commits have
+ * been applied; this patches that state forward to the next revision by
+ * copying unchanged regions through untouched and rebuilding each changed
+ * hunk via {@link applyChangedBlock}. Returns the next file snapshot with
+ * span-level commit ownership.
+ */
 export function applyPatchToAttributedLines(
   previousLines: AttributedLine[],
   nextPlainLines: string[],
   diffText: string,
   commitHash: string
 ): AttributedLine[] {
-  // Replay one revision transition over the current attribution state.
-  //
-  // previousLines already represent the file after all earlier commits have
-  // been applied. We now patch that attribution state forward to the next
-  // revision:
-  // - unchanged regions are copied through untouched
-  // - each changed hunk is rebuilt by applyChangedBlock
-  //
-  // After processing all hunks, the returned AttributedLine[] describes the
-  // next file snapshot with span-level commit ownership.
   const hunks = parseDiffHunks(diffText);
   if (hunks.length === 0) {
     return previousLines;
@@ -463,6 +449,7 @@ export function applyPatchToAttributedLines(
   return nextAttributedLines;
 }
 
+/** Builds placeholder commit metadata representing uncommitted working-tree changes. */
 function createWorkingTreeMetadata(): CommitMetadata {
   return {
     commitHash: WORKING_TREE_COMMIT,
@@ -473,6 +460,7 @@ function createWorkingTreeMetadata(): CommitMetadata {
   };
 }
 
+/** Reads a file's content as it existed at a specific commit via `git show`. */
 async function readFileContentAtRevision(
   repoRoot: string,
   commitHash: string,
@@ -499,6 +487,7 @@ async function readFileContentAtRevision(
   };
 }
 
+/** Lists every commit (oldest first) that touched a file, following renames, via `git log --follow`. */
 async function listFileCommits(
   repoRoot: string,
   repoRelativePath: string
@@ -545,10 +534,12 @@ async function listFileCommits(
   };
 }
 
+/** Indexes commit metadata by commit hash for quick lookup. */
 function createMetadataMap(commits: CommitMetadata[]): Map<string, CommitMetadata> {
   return new Map(commits.map((commit) => [commit.commitHash, commit] as const));
 }
 
+/** Flattens per-line attributed spans into a flat list of commit-ownership ranges with line/column coordinates. */
 function buildOwnershipRanges(
   attributedLines: AttributedLine[],
   metadataByCommit: Map<string, CommitMetadata>
@@ -589,6 +580,19 @@ type OwnershipResult =
 type BlameCacheEntry = { text: string; result: OwnershipResult & { ok: true } };
 const blameCache = new Map<string, BlameCacheEntry>();
 
+/**
+ * End-to-end provenance reconstruction for a file, giving a practical
+ * within-line ownership model finer than `git blame` while still being
+ * derived entirely from repository history.
+ *
+ * Algorithm: collect every commit that touched the file (oldest to newest);
+ * load the first snapshot and assign it entirely to that commit; for each
+ * later commit, diff against the previous one with zero context and patch
+ * the attribution state forward so only changed tokens move to the newer
+ * commit; if the working tree differs from HEAD, apply one more patch step
+ * marking new spans as uncommitted; finally convert the span list into
+ * editor ranges. Results are cached per file/repo keyed on current text.
+ */
 export async function buildFileOwnershipRanges(
   repoRoot: string,
   repoRelativePath: string,
@@ -604,23 +608,6 @@ export async function buildFileOwnershipRanges(
       failure: VisualizationGitFailure;
     }
 > {
-  // End-to-end provenance reconstruction for the active file.
-  //
-  // High-level algorithm:
-  // 1. Collect the commits that touched this file, oldest -> newest.
-  // 2. Load the first file snapshot and assign the entire content to that
-  //    first commit.
-  // 3. For each later commit:
-  //    - load the next snapshot
-  //    - diff previous commit vs current commit with zero context
-  //    - patch the attribution state forward so only changed tokens move to the
-  //      newer commit
-  // 4. If the working tree differs from HEAD, do one more patch step and mark
-  //    newly introduced spans as uncommitted working-tree ownership.
-  // 5. Convert the final span list into editor ranges for visualization.
-  //
-  // This gives us a practical within-line ownership model that is finer than
-  // git blame while still being derived entirely from repository history.
   const cacheKey = `${repoRoot}\0${repoRelativePath}`;
   const cached = blameCache.get(cacheKey);
   if (cached && cached.text === currentText) {

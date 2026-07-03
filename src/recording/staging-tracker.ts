@@ -39,6 +39,7 @@ type AssistantWindowState = {
   awaitingMaterialization: boolean;
 };
 
+/** Resolves paths to absolute form, dropping blanks and duplicates, and returns them sorted. */
 function normalizePaths(paths: Iterable<string>): string[] {
   return Array.from(
     new Set(
@@ -49,6 +50,7 @@ function normalizePaths(paths: Iterable<string>): string[] {
   ).sort((left, right) => left.localeCompare(right));
 }
 
+/** Converts a human window's accumulated state into a commit, or null if there is nothing to commit. */
 function finalizeHumanWindow(
   state: HumanWindowState
 ): HumanWindowCommit | null {
@@ -69,6 +71,11 @@ function finalizeHumanWindow(
   };
 }
 
+/**
+ * Converts an assistant window's accumulated state into a commit, or null
+ * if it is still awaiting materialization (a deferred boundary event whose
+ * file change has not landed yet) or has nothing to commit.
+ */
 function finalizeAssistantWindow(
   state: AssistantWindowState
 ): AssistantWindowCommit | null {
@@ -90,6 +97,10 @@ function finalizeAssistantWindow(
   };
 }
 
+/**
+ * Attributes tracked file changes to either a "human" or "assistant"
+ * ownership window and produces window commits as those windows close.
+ */
 export class FineGrainedStagingTracker {
   private humanState: HumanWindowState = {
     kind: "human",
@@ -102,6 +113,7 @@ export class FineGrainedStagingTracker {
 
   constructor(private readonly assistantDebounceMs: number) {}
 
+  /** Returns whether an event only announces an intent to touch files (e.g. a tool call) rather than a confirmed edit, so its window must wait for the resulting file change before it can be committed. */
   private isDeferredAssistantBoundary(event: AssistantEvent): boolean {
     return (
       event.kind === "tool-called" &&
@@ -143,6 +155,11 @@ export class FineGrainedStagingTracker {
     }
   }
 
+  /**
+   * Records an assistant event, opening an assistant window if none is
+   * active. Flushes and returns any currently open human window as a
+   * commit first, since an assistant event always closes the human window.
+   */
   recordAssistantEvent(
     event: AssistantEvent,
     at = Date.now()
@@ -193,6 +210,11 @@ export class FineGrainedStagingTracker {
     return commits;
   }
 
+  /**
+   * Closes and returns the assistant window as a commit if its debounce
+   * timeout has elapsed and it is not awaiting materialization; otherwise
+   * returns null and leaves the window open.
+   */
   flushAssistantWindowIfIdle(at = Date.now()): WindowCommit | null {
     if (!this.assistantState) {
       return null;
@@ -213,6 +235,7 @@ export class FineGrainedStagingTracker {
     return commit;
   }
 
+  /** Unconditionally closes any open assistant and human windows (used when recording stops) and returns their commits. */
   flushAll(at = Date.now()): WindowCommit[] {
     const commits: WindowCommit[] = [];
 
@@ -246,10 +269,12 @@ export class FineGrainedStagingTracker {
   }
 }
 
+/** Formats a millisecond epoch timestamp as an ISO 8601 string. */
 function formatIsoTimestamp(at: number): string {
   return new Date(at).toISOString();
 }
 
+/** Builds the git commit message for a human or assistant window commit, embedding window metadata and (for assistant windows) each event's JSON payload. */
 export function formatWindowCommitMessage(
   commit: WindowCommit,
   repoRoot?: string

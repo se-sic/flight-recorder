@@ -77,6 +77,7 @@ const visualizationController: VisualizationController = {
   lastRunTimestamp: 0,
 };
 
+/** Finds the editor the active visualization is attached to, falling back to the currently active file editor. */
 function findVisualizationEditor(): vscode.TextEditor | undefined {
   const uri = visualizationController.activeVisualization?.editorUri;
   if (uri) {
@@ -91,6 +92,7 @@ function findVisualizationEditor(): vscode.TextEditor | undefined {
   return active?.document.uri.scheme === "file" ? active : undefined;
 }
 
+/** Disposes all decoration types for the currently active visualization and clears it. */
 function clearActiveVisualization(): void {
   if (!visualizationController.activeVisualization) {
     return;
@@ -104,6 +106,7 @@ function clearActiveVisualization(): void {
   visualizationController.activeVisualization = null;
 }
 
+/** Disposes and clears all registered visualization event-listener subscriptions. */
 function disposeSubscriptions(): void {
   for (const subscription of visualizationController.subscriptions) {
     subscription.dispose();
@@ -111,6 +114,7 @@ function disposeSubscriptions(): void {
   visualizationController.subscriptions = [];
 }
 
+/** Ensures the legend webview panel exists, wiring its coloring-mode/palette/dispose callbacks into the controller. */
 function ensureLegendPanelForController(): vscode.WebviewPanel | null {
   const callbacks: LegendPanelCallbacks = {
     onColoringModeChange: (mode) => {
@@ -160,6 +164,7 @@ function ensureLegendPanelForController(): vscode.WebviewPanel | null {
   return panel;
 }
 
+/** Shows the legend panel with an empty-state message explaining why no visualization is displayed. */
 function renderLegendEmpty(reason: string): void {
   const panel = ensureLegendPanelForController();
   if (!panel) {
@@ -168,6 +173,7 @@ function renderLegendEmpty(reason: string): void {
   setLegendHtml(panel, buildLegendEmptyHtml(reason));
 }
 
+/** Returns whether the active color theme is a dark or high-contrast theme. */
 function isEditorDarkTheme(): boolean {
   const kind = vscode.window.activeColorTheme.kind;
   return (
@@ -176,6 +182,7 @@ function isEditorDarkTheme(): boolean {
   );
 }
 
+/** Re-renders the legend panel's HTML for the given file's commit ownership and current coloring/palette selection. */
 function updateLegendPanel(
   filePath: string,
   commits: ReturnType<typeof buildCommitAgeEntriesFromRanges>,
@@ -199,6 +206,7 @@ function updateLegendPanel(
   );
 }
 
+/** Rebuilds the emphasized decorations that highlight all ranges owned by the currently selected commit. */
 function updateSelectedCommitDecorations(
   activeVisualization: ActiveVisualization,
   editor: vscode.TextEditor
@@ -231,6 +239,7 @@ function updateSelectedCommitDecorations(
   }
 }
 
+/** Updates the selected-commit highlight and legend panel when the cursor moves in the visualized editor. */
 function updateLegendSelectionForEditor(editor: vscode.TextEditor | undefined): void {
   if (!visualizationController.enabled || !editor) {
     return;
@@ -265,6 +274,7 @@ function updateLegendSelectionForEditor(editor: vscode.TextEditor | undefined): 
   );
 }
 
+/** Maps a visualization git-failure kind to a human-readable message shown to the user. */
 function gitFailureUiMessage(kind: VisualizationGitFailureKind, fallback: string): string {
   switch (kind) {
     case "git_not_found":
@@ -277,6 +287,11 @@ function gitFailureUiMessage(kind: VisualizationGitFailureKind, fallback: string
   }
 }
 
+/**
+ * Logs a visualization git failure and shows an error message the first
+ * time each failure kind occurs. Returns whether the failure is fatal
+ * enough that the visualization feature should be stopped entirely.
+ */
 function reportVisualizationGitFailure(failure: VisualizationGitFailure): boolean {
   const output = getLogChannel();
   output.error(`${failure.msg}\n${failure.err}`);
@@ -291,6 +306,7 @@ function reportVisualizationGitFailure(failure: VisualizationGitFailure): boolea
 
 const repoRootCache = new Map<string, string>();
 
+/** Resolves (and caches per parent directory) the git repository root that contains a file. */
 async function resolveRepoRootForFile(
   filePath: string
 ): Promise<
@@ -337,6 +353,12 @@ async function resolveRepoRootForFile(
   };
 }
 
+/**
+ * Rebuilds and applies edit-history decorations and the legend panel for
+ * the given editor: resolves the repo root, computes commit ownership
+ * ranges and per-commit palettes for the current coloring mode, then
+ * replaces the previously active visualization's decorations.
+ */
 async function applyVisualizationToEditor(
   editor: vscode.TextEditor | undefined
 ): Promise<void> {
@@ -465,6 +487,7 @@ async function applyVisualizationToEditor(
   );
 }
 
+/** Registers the VS Code event listeners (editor change, save, theme change, selection change) that refresh the visualization. */
 function registerVisualizationListeners(context: vscode.ExtensionContext): void {
   visualizationController.subscriptions.push(
     vscode.window.onDidChangeActiveTextEditor((editor) => {
@@ -494,6 +517,11 @@ function registerVisualizationListeners(context: vscode.ExtensionContext): void 
   context.subscriptions.push(...visualizationController.subscriptions);
 }
 
+/**
+ * Entry point for the "Open Edit History Visualization" command: enables
+ * the feature, registers listeners, and renders the visualization for the
+ * currently active editor.
+ */
 export async function startEditHistoryVisualization(
   context: vscode.ExtensionContext
 ): Promise<void> {
@@ -524,10 +552,12 @@ export async function startEditHistoryVisualization(
   );
 }
 
+/** Returns whether the edit history visualization feature is currently enabled. */
 export function isEditHistoryVisualizationEnabled(): boolean {
   return visualizationController.enabled;
 }
 
+/** Disables the edit history visualization, disposing all decorations, listeners, and the legend panel. */
 export function stopEditHistoryVisualization(): void {
   if (!visualizationController.enabled) {
     vscode.window.showInformationMessage(
@@ -548,6 +578,7 @@ export function stopEditHistoryVisualization(): void {
   );
 }
 
+/** Tears down the visualization feature silently (no user-facing message), used on extension deactivation. */
 export function disposeEditHistoryVisualization(): void {
   visualizationController.enabled = false;
   visualizationController.shownFailureKinds.clear();
