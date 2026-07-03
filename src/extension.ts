@@ -14,6 +14,7 @@ import {
   stopRecording,
   deactivateRecording,
 } from "./recording/session";
+import { configureClaudeHooks } from "./recording/claude-hooks";
 import { COMMAND_STATUS, EXTENSION_NAME } from "./utils/constants";
 import { initializeLogChannel } from "./utils/logging";
 
@@ -75,6 +76,13 @@ export function activate(context: vscode.ExtensionContext) {
     }
   );
 
+  const configureClaudeHooksCmd = vscode.commands.registerCommand(
+    "flightRecorder.configureClaudeHooks",
+    async () => {
+      await configureClaudeHooks();
+    }
+  );
+
   const anonymizeRepoCmd = vscode.commands.registerCommand(
     "flightRecorder.anonymizeRepo",
     async () => {
@@ -94,6 +102,7 @@ export function activate(context: vscode.ExtensionContext) {
     stopCmd,
     printCmd,
     exportChatsCmd,
+    configureClaudeHooksCmd,
     anonymizeRepoCmd,
     editHistoryVisualizationCmd
   );

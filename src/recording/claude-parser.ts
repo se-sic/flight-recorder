@@ -11,6 +11,7 @@ type ClaudeHookEventPayload = {
   hook_event_name?: string;
   tool_name?: string;
   tool_input?: Record<string, unknown>;
+  tool_response?: Record<string, unknown>;
   file_path?: string;
   event?: string;
   cwd?: string;
@@ -132,6 +133,43 @@ function mapHookFileChangedOperation(payload: ClaudeHookEventPayload): FileOpera
   }
 }
 
+function mapHookToolResponseOperation(
+  toolResponse: Record<string, unknown> | undefined,
+  fallbackToolName: string,
+  fallbackToolInput: Record<string, unknown> | undefined
+): FileOperation[] {
+  const responseFilePath =
+    typeof toolResponse?.filePath === "string"
+      ? toolResponse.filePath
+      : typeof (toolResponse?.file as { filePath?: unknown } | undefined)?.filePath ===
+          "string"
+        ? ((toolResponse?.file as { filePath: string }).filePath)
+        : undefined;
+
+  if (!responseFilePath) {
+    return inferFileOperationsFromTool(fallbackToolName, fallbackToolInput);
+  }
+
+  const resolved = path.resolve(responseFilePath);
+  const responseType =
+    typeof toolResponse?.type === "string" ? toolResponse.type : undefined;
+
+  switch (responseType) {
+    case "create":
+      return [{ kind: "create", path: resolved }];
+    case "update":
+    case "replace":
+      return [{ kind: "update", path: resolved }];
+    case "delete":
+      return [{ kind: "delete", path: resolved }];
+    default:
+      if (typeof toolResponse?.originalFile === "string") {
+        return [{ kind: "update", path: resolved }];
+      }
+      return [{ kind: "unknown", path: resolved }];
+  }
+}
+
 function normalizeTranscriptToolUseEvent(
   timestamp: string,
   sessionId: string | undefined,
@@ -199,15 +237,66 @@ export class ClaudeCodeParser {
 
     if (
       payload.hook_event_name === "PreToolUse" ||
-      payload.hook_event_name === "PostToolUse"
+      payload.hook_event_name === "PostToolUse" ||
+      payload.hook_event_name === "PostToolUseFailure"
     ) {
       const toolName = payload.tool_name ?? "unknown";
+      const isFileEditTool =
+        toolName === "Edit" ||
+        toolName === "Write" ||
+        toolName === "MultiEdit" ||
+        toolName === "NotebookEdit";
+
+      if (payload.hook_event_name === "PreToolUse" && isFileEditTool) {
+        return {
+          timestamp,
+          kind: "tool-called",
+          capability: "tool-call",
+          source: {
+            assistantId: "claude-code",
+            adapterId: "claude-hook-log-parser",
+            rawSignal: payload.hook_event_name,
+          },
+          fileOperations: inferFileOperationsFromTool(toolName, payload.tool_input),
+          sessionId: payload.session_id,
+          toolName,
+          metadata: {
+            transcriptPath: payload.transcript_path,
+            cwd: payload.cwd,
+            toolInput: payload.tool_input,
+          },
+        };
+      }
+
+      if (payload.hook_event_name === "PostToolUse" && isFileEditTool) {
+        return {
+          timestamp,
+          kind: "edit-applied",
+          capability: "file-edit",
+          source: {
+            assistantId: "claude-code",
+            adapterId: "claude-hook-log-parser",
+            rawSignal: payload.hook_event_name,
+          },
+          fileOperations: mapHookToolResponseOperation(
+            payload.tool_response,
+            toolName,
+            payload.tool_input
+          ),
+          sessionId: payload.session_id,
+          toolName,
+          metadata: {
+            transcriptPath: payload.transcript_path,
+            cwd: payload.cwd,
+            toolInput: payload.tool_input,
+            toolResponse: payload.tool_response,
+          },
+        };
+      }
+
       return {
         timestamp,
-        kind:
-          toolName === "Edit" || toolName === "Write" || toolName === "MultiEdit"
-            ? "edit-applied"
-            : "tool-called",
+        kind: "tool-called",
         capability: mapToolNameToCapability(toolName),
         source: {
           assistantId: "claude-code",

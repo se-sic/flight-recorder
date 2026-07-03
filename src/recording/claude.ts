@@ -1,57 +1,21 @@
 import * as fs from "fs";
-import * as os from "os";
 import * as path from "path";
 import * as vscode from "vscode";
 import { ClaudeCodeParser } from "./claude-parser";
 import {
   AssistantIntegration,
   AssistantIntegrationReady,
+  AssistantIntegrationSetupAction,
 } from "./integration";
-
-type ClaudeSourceMode = "auto" | "transcript" | "hookLog";
-type ClaudeMissingSourceBehavior = "fail" | "wait";
-
-function getClaudeConfigDir(): string {
-  const cfg = vscode.workspace.getConfiguration("flightRecorder");
-  const configured = cfg.get<string>("claudeConfigDir", "").trim();
-  if (configured.length > 0) {
-    return path.resolve(configured);
-  }
-
-  const envConfigured = process.env.CLAUDE_CONFIG_DIR?.trim();
-  if (envConfigured) {
-    return path.resolve(envConfigured);
-  }
-
-  return path.join(os.homedir(), ".claude");
-}
-
-function getClaudeSourceMode(): ClaudeSourceMode {
-  const cfg = vscode.workspace.getConfiguration("flightRecorder");
-  return cfg.get<ClaudeSourceMode>("claudeSource", "auto");
-}
-
-function getClaudeMissingSourceBehavior(): ClaudeMissingSourceBehavior {
-  const cfg = vscode.workspace.getConfiguration("flightRecorder");
-  return cfg.get<ClaudeMissingSourceBehavior>(
-    "claudeMissingSourceBehavior",
-    "wait"
-  );
-}
-
-function getConfiguredClaudeHookLogPath(repoRoot: string): string {
-  const cfg = vscode.workspace.getConfiguration("flightRecorder");
-  const configured = cfg.get<string>(
-    "claudeHookLogPath",
-    ".claude/flight-recorder-hooks.jsonl"
-  );
-
-  if (path.isAbsolute(configured)) {
-    return configured;
-  }
-
-  return path.resolve(repoRoot, configured);
-}
+import {
+  ClaudeMissingSourceBehavior,
+  ClaudeSourceMode,
+  getClaudeConfigDir,
+  getClaudeMissingSourceBehavior,
+  getConfiguredClaudeHookLogPath,
+  getClaudeSourceMode,
+  isClaudeHookSourceMode,
+} from "./claude-config";
 
 function looksLikeTranscriptFile(filePath: string): boolean {
   return (
@@ -170,6 +134,39 @@ function discoverClaudeTranscriptFile(
   return pickNewestFile(matching);
 }
 
+function createConfigureHooksAction(): AssistantIntegrationSetupAction {
+  return {
+    command: "flightRecorder.configureClaudeHooks",
+    title: "Configure Claude Hooks",
+    message:
+      "Claude hook-log tracking is not configured for this repository yet.",
+  };
+}
+
+function buildMissingSourceMessage(
+  sourceMode: ClaudeSourceMode,
+  hookLogPath: string,
+  configDir: string
+): string {
+  if (sourceMode === "hookLog") {
+    return `Waiting for Claude hook log creation at ${hookLogPath}. Run "Flight Recorder: Configure Claude Hooks" if this repo has not been set up yet.`;
+  }
+
+  return `Waiting for the first Claude session source for this repo. Hooks path: ${hookLogPath}; transcripts root: ${path.join(configDir, "projects")}. Run "Flight Recorder: Configure Claude Hooks" to set up hook-based tracking.`;
+}
+
+function buildMissingSourceError(
+  sourceMode: ClaudeSourceMode,
+  hookLogPath: string,
+  configDir: string
+): string {
+  if (sourceMode === "hookLog") {
+    return `Could not find the configured Claude hook log at ${hookLogPath}. Run "Flight Recorder: Configure Claude Hooks" first.`;
+  }
+
+  return `Could not find a Claude transcript or hook log for this project. Searched for hooks at ${hookLogPath} and transcripts under ${path.join(configDir, "projects")}. Run "Flight Recorder: Configure Claude Hooks" if you want hook-based tracking.`;
+}
+
 export class ClaudeCodeIntegration implements AssistantIntegration {
   readonly assistantId = "claude-code";
   readonly displayName = "Claude Code";
@@ -187,10 +184,7 @@ export class ClaudeCodeIntegration implements AssistantIntegration {
     const discoverLogFile = (): string | null => {
       const transcriptPath = discoverClaudeTranscriptFile(configDir, repoRoot);
 
-      if (
-        (sourceMode === "auto" || sourceMode === "hookLog") &&
-        fs.existsSync(hookLogPath)
-      ) {
+      if (isClaudeHookSourceMode(sourceMode) && fs.existsSync(hookLogPath)) {
         return hookLogPath;
       }
 
@@ -205,6 +199,7 @@ export class ClaudeCodeIntegration implements AssistantIntegration {
     };
 
     const logFile = discoverLogFile();
+    const configureHooksAction = createConfigureHooksAction();
 
     if (!logFile) {
       if (missingSourceBehavior === "wait") {
@@ -214,20 +209,24 @@ export class ClaudeCodeIntegration implements AssistantIntegration {
           displayName: this.displayName,
           logSnapshotPrefix: this.logSnapshotPrefix,
           parser: new ClaudeCodeParser(),
-          waitMessage:
-            sourceMode === "hookLog"
-              ? `Waiting for Claude hook log creation at ${hookLogPath}.`
-              : `Waiting for the first Claude session source for this repo. Hooks path: ${hookLogPath}; transcripts root: ${path.join(configDir, "projects")}.`,
+          waitMessage: buildMissingSourceMessage(
+            sourceMode,
+            hookLogPath,
+            configDir
+          ),
           awaitLogFile: async () => discoverLogFile(),
+          setupAction: isClaudeHookSourceMode(sourceMode)
+            ? configureHooksAction
+            : undefined,
         };
       }
 
       return {
         ok: false,
-        msg:
-          sourceMode === "hookLog"
-            ? `Could not find the configured Claude hook log at ${hookLogPath}.`
-            : `Could not find a Claude transcript or hook log for this project. Searched for hooks at ${hookLogPath} and transcripts under ${path.join(configDir, "projects")}.`,
+        msg: buildMissingSourceError(sourceMode, hookLogPath, configDir),
+        setupAction: isClaudeHookSourceMode(sourceMode)
+          ? configureHooksAction
+          : undefined,
       };
     }
 

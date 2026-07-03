@@ -5,6 +5,12 @@ export type AssistantEventParser = {
   feed(chunk: string): Generator<AssistantEvent>;
 };
 
+export type AssistantIntegrationSetupAction = {
+  command: string;
+  title: string;
+  message: string;
+};
+
 export type AssistantIntegrationReady =
   | {
       ok: true;
@@ -22,11 +28,13 @@ export type AssistantIntegrationReady =
       parser: AssistantEventParser;
       waitMessage: string;
       awaitLogFile: () => Promise<string | null>;
+      setupAction?: AssistantIntegrationSetupAction;
     }
   | {
       ok: false;
       msg: string;
       err?: string;
+      setupAction?: AssistantIntegrationSetupAction;
     };
 
 export interface AssistantIntegration {

@@ -128,6 +128,94 @@ test("ClaudeCodeParser parses hook tool payloads", () => {
   assert.equal(events[0].toolName, "Bash");
 });
 
+test("ClaudeCodeParser emits a deferred boundary for hook PreToolUse file edits", () => {
+  const parser = new ClaudeCodeParser();
+  const events = Array.from(
+    parser.feed(
+      `${JSON.stringify({
+        session_id: "session-3a",
+        hook_event_name: "PreToolUse",
+        tool_name: "Write",
+        tool_input: {
+          file_path: "/Users/test/demo/src/app.ts",
+          content: "hello",
+        },
+      })}\n`
+    )
+  );
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].kind, "tool-called");
+  assert.equal(events[0].capability, "tool-call");
+  assert.equal(events[0].toolName, "Write");
+  assert.deepEqual(events[0].fileOperations, [
+    {
+      kind: "unknown",
+      path: "/Users/test/demo/src/app.ts",
+    },
+  ]);
+});
+
+test("ClaudeCodeParser parses confirmed hook PostToolUse file creations", () => {
+  const parser = new ClaudeCodeParser();
+  const events = Array.from(
+    parser.feed(
+      `${JSON.stringify({
+        session_id: "session-3b",
+        hook_event_name: "PostToolUse",
+        tool_name: "Write",
+        tool_input: {
+          file_path: "/Users/test/demo/src/app.ts",
+          content: "hello",
+        },
+        tool_response: {
+          type: "create",
+          filePath: "/Users/test/demo/src/app.ts",
+          content: "hello",
+          originalFile: null,
+        },
+      })}\n`
+    )
+  );
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].kind, "edit-applied");
+  assert.equal(events[0].capability, "file-edit");
+  assert.equal(events[0].toolName, "Write");
+  assert.deepEqual(events[0].fileOperations, [
+    {
+      kind: "create",
+      path: "/Users/test/demo/src/app.ts",
+    },
+  ]);
+});
+
+test("ClaudeCodeParser parses PostToolUseFailure hook payloads", () => {
+  const parser = new ClaudeCodeParser();
+  const events = Array.from(
+    parser.feed(
+      `${JSON.stringify({
+        session_id: "session-3c",
+        hook_event_name: "PostToolUseFailure",
+        tool_name: "Write",
+        tool_input: {
+          file_path: "/Users/test/demo/src/app.ts",
+        },
+      })}\n`
+    )
+  );
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].kind, "tool-called");
+  assert.equal(events[0].toolName, "Write");
+  assert.deepEqual(events[0].fileOperations, [
+    {
+      kind: "unknown",
+      path: "/Users/test/demo/src/app.ts",
+    },
+  ]);
+});
+
 test("ClaudeCodeParser ignores rejected transcript file-edit tool results", () => {
   const parser = new ClaudeCodeParser();
   const events = Array.from(

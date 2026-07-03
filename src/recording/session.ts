@@ -10,7 +10,10 @@ import {
   validateGitRecordingReadiness,
 } from "./commits";
 import { Tailer } from "./parser";
-import { AssistantEventParser } from "./integration";
+import {
+  AssistantEventParser,
+  AssistantIntegrationSetupAction,
+} from "./integration";
 import {
   getActiveAssistantIntegration,
   getAvailableAssistantIntegrationIds,
@@ -19,6 +22,7 @@ import {
   FineGrainedStagingTracker,
   WindowCommit,
 } from "./staging-tracker";
+import { getClaudeSourceMode } from "./claude-config";
 import { getLogChannel } from "../utils/logging";
 import { getWorkspaceRepoRoot } from "../utils/paths";
 import { EXTENSION_NAME } from "../utils/constants";
@@ -46,14 +50,7 @@ let running: RecordingSession | null = null;
 let stopping = false;
 let recordingStatusBarItem: vscode.StatusBarItem | null = null;
 let extensionContextRef: vscode.ExtensionContext | null = null;
-
-function createEmptyParserProxy() {
-  return {
-    *feed(_chunk: string) {
-      yield* [];
-    },
-  };
-}
+let claudeNewSessionHintShown = false;
 
 function normalizeFileUri(uri: vscode.Uri): string | null {
   if (uri.scheme !== "file") {
@@ -67,6 +64,18 @@ function normalizePaths(paths: Iterable<string>): string[] {
   return Array.from(
     new Set(Array.from(paths).map((candidate) => path.resolve(candidate)))
   ).sort((left, right) => left.localeCompare(right));
+}
+
+function filterInternalTrackingPaths(
+  session: RecordingSession,
+  paths: Iterable<string>
+): string[] {
+  const ignored = new Set<string>();
+  if (session.logFile) {
+    ignored.add(path.resolve(session.logFile));
+  }
+
+  return normalizePaths(paths).filter((candidate) => !ignored.has(candidate));
 }
 
 async function saveTrackedFilesIfOpen(
@@ -128,11 +137,14 @@ async function commitTrackedWindowAndReport(
   session: RecordingSession,
   commit: WindowCommit
 ): Promise<boolean> {
-  await saveTrackedFilesIfOpen(commit.files);
+  const filteredFiles = filterInternalTrackingPaths(session, commit.files);
+  const filteredCommit = { ...commit, files: filteredFiles };
+
+  await saveTrackedFilesIfOpen(filteredCommit.files);
 
   const result = await commitTrackedWindow(
     session.repoRoot,
-    commit,
+    filteredCommit,
     session.addAll,
     session.allowEmpty,
     session.dryRun
@@ -157,7 +169,12 @@ function registerWorkspaceChangeTracking(
   session: RecordingSession
 ): vscode.Disposable[] {
   const trackPaths = (paths: Iterable<string>) => {
-    session.tracker.recordHumanChange(normalizePaths(paths));
+    const filteredPaths = filterInternalTrackingPaths(session, paths);
+    if (filteredPaths.length === 0) {
+      return;
+    }
+
+    session.tracker.recordHumanChange(filteredPaths);
   };
 
   const trackUris = (uris: readonly vscode.Uri[]) => {
@@ -319,6 +336,39 @@ function getConfiguredIntegrationOrShowError() {
   return null;
 }
 
+async function maybeRunIntegrationSetupAction(
+  action: AssistantIntegrationSetupAction | undefined
+): Promise<void> {
+  if (!action) {
+    return;
+  }
+
+  const choice = await vscode.window.showInformationMessage(
+    action.message,
+    action.title
+  );
+  if (choice === action.title) {
+    await vscode.commands.executeCommand(action.command);
+  }
+}
+
+async function maybeShowClaudeNewSessionHint(
+  assistantId: string
+): Promise<void> {
+  if (assistantId !== "claude-code" || claudeNewSessionHintShown) {
+    return;
+  }
+
+  if (getClaudeSourceMode() !== "hookLog") {
+    return;
+  }
+
+  claudeNewSessionHintShown = true;
+  await vscode.window.showInformationMessage(
+    "Claude hook recording is active. If Claude chat was already open before hook setup, start a new Claude chat/session in this repository so the current session picks up the hook state."
+  );
+}
+
 export async function startRecording(
   context: vscode.ExtensionContext
 ): Promise<boolean> {
@@ -358,6 +408,7 @@ export async function startRecording(
   const prepared = await integration.prepareRecording(context, repoRoot);
   if (prepared.ok === false) {
     output.error(`${prepared.msg}\n${prepared.err ?? ""}`);
+    await maybeRunIntegrationSetupAction(prepared.setupAction);
     vscode.window.showErrorMessage(
       `${EXTENSION_NAME} could not prepare ${integration.displayName} recording. ${prepared.msg}`
     );
@@ -368,8 +419,11 @@ export async function startRecording(
   getLogChannel().show(true);
   if (prepared.ok === true) {
     output.info(`Using ${prepared.displayName} log: ${prepared.logFile}`);
+    await maybeShowClaudeNewSessionHint(prepared.assistantId);
   } else {
     output.info(prepared.waitMessage);
+    await maybeRunIntegrationSetupAction(prepared.setupAction);
+    await maybeShowClaudeNewSessionHint(prepared.assistantId);
   }
 
   let session: RecordingSession | null = null;

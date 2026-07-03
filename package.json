@@ -40,6 +40,10 @@
         "title": "Flight Recorder: Export All Chats"
       },
       {
+        "command": "flightRecorder.configureClaudeHooks",
+        "title": "Flight Recorder: Configure Claude Hooks"
+      },
+      {
         "command": "flightRecorder.anonymizeRepo",
         "title": "Flight Recorder: Anonymize Repository"
       },
@@ -86,7 +90,7 @@
             "transcript",
             "hookLog"
           ],
-          "default": "auto",
+          "default": "hookLog",
           "description": "For the Claude Code integration, choose whether Flight Recorder should prefer a configured hook log, the local transcript store, or auto-detect between them."
         },
         "flightRecorder.claudeHookLogPath": {

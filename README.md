@@ -18,6 +18,7 @@ The following commands can be executed from the command palette:
 
 - `Flight Recorder: Start Recording` (`flightRecorder.start`)
 - `Flight Recorder: Stop Recording` (`flightRecorder.stop`)
+- `Flight Recorder: Configure Claude Hooks` (`flightRecorder.configureClaudeHooks`)
 - `Flight Recorder: Export All Chats` (`flightRecorder.exportAllChats`)
 - `Flight Recorder: Anonymize Repository` (`flightRecorder.anonymizeRepo`)
 - `Flight Recorder: Edit History Visualization` (`flightRecorder.editHistoryVisualization`)
@@ -68,7 +69,20 @@ The Claude Code integration supports two official data sources:
 - `wait`: start recording immediately, keep tracking human edits, and attach the Claude source automatically once the hook log or transcript appears
 - `fail`: abort startup immediately and ask the user to create a Claude session first
 
-For better file-operation coverage, the recommended Claude hook setup is to log at least `PreToolUse`, `PostToolUse`, and `FileChanged` into the path configured by `flightRecorder.claudeHookLogPath`, for example:
+For the lowest-friction setup, run `Flight Recorder: Configure Claude Hooks`. The command:
+
+- creates or updates Claude project settings in either `.claude/settings.local.json` or `.claude/settings.json`
+- registers a broad set of hook events, including tool lifecycle hooks and file-change hooks
+- creates the hook log target directory and a repo-local hook script under `.claude/hooks/`
+- switches the current workspace to `activeIntegration = claude-code`, `claudeSource = hookLog`, and `claudeMissingSourceBehavior = wait`
+- excludes `.claude/settings.local.json` and the live hook log from git when you choose the local-only setup
+- reminds you to start a new Claude chat/session in this repo, because already-open chats can keep the old hook state
+
+If recording starts in Claude `hookLog` mode and the configured hook log does not exist yet, Flight Recorder now offers a `Configure Claude Hooks` button automatically.
+
+If Claude chat was already open before hook setup, start a new chat/session in that repository before recording. Flight Recorder also shows this reminder when Claude hook recording starts.
+
+The generated Claude hook config uses a repo-local script handler plus a hook-log path argument, for example:
 
 ```json
 {
@@ -79,7 +93,10 @@ For better file-operation coverage, the recommended Claude hook setup is to log 
         "hooks": [
           {
             "type": "command",
-            "command": "cat >> \"$CLAUDE_PROJECT_DIR\"/.claude/flight-recorder-hooks.jsonl"
+            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/flight-recorder-log-hook.sh",
+            "args": [
+              "${CLAUDE_PROJECT_DIR}/.claude/flight-recorder-hooks.jsonl"
+            ]
           }
         ]
       }
@@ -90,7 +107,24 @@ For better file-operation coverage, the recommended Claude hook setup is to log 
         "hooks": [
           {
             "type": "command",
-            "command": "cat >> \"$CLAUDE_PROJECT_DIR\"/.claude/flight-recorder-hooks.jsonl"
+            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/flight-recorder-log-hook.sh",
+            "args": [
+              "${CLAUDE_PROJECT_DIR}/.claude/flight-recorder-hooks.jsonl"
+            ]
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/flight-recorder-log-hook.sh",
+            "args": [
+              "${CLAUDE_PROJECT_DIR}/.claude/flight-recorder-hooks.jsonl"
+            ]
           }
         ]
       }
@@ -101,7 +135,10 @@ For better file-operation coverage, the recommended Claude hook setup is to log 
         "hooks": [
           {
             "type": "command",
-            "command": "cat >> \"$CLAUDE_PROJECT_DIR\"/.claude/flight-recorder-hooks.jsonl"
+            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/flight-recorder-log-hook.sh",
+            "args": [
+              "${CLAUDE_PROJECT_DIR}/.claude/flight-recorder-hooks.jsonl"
+            ]
           }
         ]
       }
