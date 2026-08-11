@@ -20,9 +20,12 @@ import {
   getConfiguredIntegrationId,
   pickAssistantIntegration,
 } from "./integration";
+import { AssistantEvent } from "./event";
 import {
   FineGrainedStagingTracker,
+  hashInsertedText,
   WindowCommit,
+  WorkspaceTextChange,
 } from "./staging-tracker";
 import { getClaudeSourceMode } from "./agents/claude/config";
 import { getLogChannel } from "../utils/logging";
@@ -172,6 +175,24 @@ async function commitTrackedWindowAndReport(
   return shouldStop;
 }
 
+/** Records one assistant event and commits any human window that the assistant boundary closes. */
+async function processAssistantEvent(
+  session: RecordingSession,
+  event: AssistantEvent,
+  at = Date.now()
+): Promise<boolean> {
+  const preAssistantCommits = session.tracker.recordAssistantEvent(event, at);
+
+  for (const commit of preAssistantCommits) {
+    const shouldStop = await commitTrackedWindowAndReport(session, commit);
+    if (shouldStop) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 /** Registers VS Code workspace listeners (document edits, file create/delete/rename) that feed human changes into the staging tracker. */
 function registerWorkspaceChangeTracking(
   session: RecordingSession
@@ -199,7 +220,29 @@ function registerWorkspaceChangeTracking(
         return;
       }
 
-      trackPaths([filePath]);
+      const filteredPaths = filterInternalTrackingPaths(session, [filePath]);
+      if (filteredPaths.length === 0) {
+        return;
+      }
+
+      const textChange: WorkspaceTextChange = {
+        path: filePath,
+        insertedTextHashes: event.contentChanges
+          .filter((change) => change.text.length > 0)
+          .map((change) => hashInsertedText(change.text)),
+        insertedTextLength: event.contentChanges.reduce(
+          (total, change) => total + change.text.length,
+          0
+        ),
+        ranges: event.contentChanges.map((change) => ({
+          startLine: change.range.start.line,
+          startColumn: change.range.start.character,
+          endLine: change.range.end.line,
+          endColumn: change.range.end.character,
+        })),
+      };
+
+      session.tracker.recordTextDocumentChange([textChange]);
     }),
     vscode.workspace.onDidCreateFiles((event) => {
       trackUris(event.files);
@@ -517,19 +560,9 @@ export async function startRecording(
     }
 
     for (const ev of session.parser.feed(chunk)) {
-      const preAssistantCommits = session.tracker.recordAssistantEvent(
-        ev,
-        Date.now()
-      );
-
-      for (const commit of preAssistantCommits) {
-        const shouldStop = await commitTrackedWindowAndReport(
-          session,
-          commit
-        );
-        if (shouldStop) {
-          return;
-        }
+      const shouldStop = await processAssistantEvent(session, ev);
+      if (shouldStop) {
+        return;
       }
     }
   }, 300);
@@ -564,6 +597,15 @@ export async function startRecording(
     return false;
   }
   session.subscriptions = registerWorkspaceChangeTracking(session);
+  for (const source of prepared.runtimeEventSources ?? []) {
+    const disposable = await source.start((event) => {
+      if (!running || running !== session) {
+        return;
+      }
+      void processAssistantEvent(session, event);
+    });
+    session.subscriptions.push(disposable);
+  }
   running = session;
   await setRecordingContext(true);
   updateRecordingStatusIndicator(true);

@@ -154,6 +154,15 @@ export class CopilotLogParser {
           rawSignal: "edit-tool",
         },
         fileOperations,
+        origin: "assistant-tool-edit",
+        evidence: [
+          {
+            type: "copilot-log-edit-tool",
+            confidence: "medium",
+            requestId,
+            timestamp: ts,
+          },
+        ],
         requestId,
       };
     }
@@ -193,6 +202,20 @@ export class CopilotLogParser {
               column: cursorColumn ?? 1,
             }
           : undefined,
+      origin: "assistant-inline-completion",
+      evidence: [
+        {
+          type: "copilot-log-ghost-text-accepted",
+          confidence: this.lastRequestedFileUri ? "medium" : "low",
+          path: this.lastRequestedFileUri
+            ? fileUriToPath(this.lastRequestedFileUri)
+            : undefined,
+          timestamp: ts,
+          details: acceptedMatch[1]
+            ? { choiceIndex: acceptedMatch[1] }
+            : undefined,
+        },
+      ],
     };
 
     yield ev;

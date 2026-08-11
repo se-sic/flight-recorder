@@ -7,6 +7,12 @@ export type AssistantEventParser = {
   feed(chunk: string): Generator<AssistantEvent>;
 };
 
+export type AssistantRuntimeEventSource = {
+  start(
+    onEvent: (event: AssistantEvent) => void
+  ): vscode.Disposable | Promise<vscode.Disposable>;
+};
+
 export type AssistantIntegrationSetupAction = {
   command: string;
   title: string;
@@ -21,6 +27,7 @@ export type AssistantIntegrationReady =
       logFile: string;
       logSnapshotPrefix: string;
       parser: AssistantEventParser;
+      runtimeEventSources?: AssistantRuntimeEventSource[];
     }
   | {
       ok: "pending";
@@ -28,6 +35,7 @@ export type AssistantIntegrationReady =
       displayName: string;
       logSnapshotPrefix: string;
       parser: AssistantEventParser;
+      runtimeEventSources?: AssistantRuntimeEventSource[];
       waitMessage: string;
       awaitLogFile: () => Promise<string | null>;
       setupAction?: AssistantIntegrationSetupAction;

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import * as path from "path";
+import { CopilotChatSessionParser } from "../src/recording/agents/copilot/chat-session";
 import { CopilotLogParser } from "../src/recording/agents/copilot/parser";
 
 const SAMPLE_LINE =
@@ -29,6 +30,8 @@ test("CopilotLogParser parses edit-tool patch events", () => {
   const ev = events[0];
   assert.equal(ev.kind, "edit-applied");
   assert.equal(ev.capability, "file-edit");
+  assert.equal(ev.origin, "assistant-tool-edit");
+  assert.equal(ev.evidence?.[0]?.type, "copilot-log-edit-tool");
   assert.equal(ev.requestId, "efcf0ac7-59d2-4c9b-b0d4-4d84a23ce134");
   assert.equal(ev.source.assistantId, "github-copilot");
   assert.equal(ev.source.rawSignal, "edit-tool");
@@ -73,6 +76,8 @@ test("CopilotLogParser parses inline completion acceptance", () => {
 
   assert.equal(ev.kind, "suggestion-accepted");
   assert.equal(ev.capability, "inline-completion");
+  assert.equal(ev.origin, "assistant-inline-completion");
+  assert.equal(ev.evidence?.[0]?.type, "copilot-log-ghost-text-accepted");
   assert.deepEqual(ev.cursorPosition, {
     line: 14,
     column: 1,
@@ -91,4 +96,65 @@ test("CopilotLogParser parses inline completion acceptance", () => {
       },
     ]
   );
+});
+
+test("CopilotChatSessionParser emits textEditGroup events", () => {
+  const parser = new CopilotChatSessionParser();
+  const session = {
+    sessionId: "chat-1",
+    requests: [
+      {
+        requestId: "req-1",
+        timestamp: "2026-04-28T10:50:00.000Z",
+        prompt: "Refactor foo",
+        response: {
+          value: [
+            {
+              kind: "textEditGroup",
+              uri: "file:///tmp/demo/foo.ts",
+              done: true,
+              edits: [
+                {
+                  range: {
+                    startLineNumber: 1,
+                    startColumn: 1,
+                  },
+                  newText: "const value = 1;\n",
+                },
+              ],
+            },
+          ],
+        },
+      },
+    ],
+  };
+
+  const events = parser.parse(JSON.stringify(session), "/tmp/chat.json");
+
+  assert.equal(events.length, 1);
+  const ev = events[0];
+  assert.equal(ev.kind, "edit-applied");
+  assert.equal(ev.capability, "file-edit");
+  assert.equal(ev.origin, "assistant-agent-chat");
+  assert.equal(ev.requestId, "req-1");
+  assert.equal(ev.sessionId, "chat-1");
+  assert.equal(ev.source.rawSignal, "textEditGroup");
+  assert.equal(ev.evidence?.[0]?.type, "copilot-chat-text-edit-group");
+  assert.equal(ev.evidence?.[0]?.confidence, "high");
+  assert.deepEqual(ev.evidence?.[0]?.details?.ranges, [
+    {
+      startLine: 0,
+      startColumn: 0,
+      endLine: 0,
+      endColumn: 0,
+    },
+  ]);
+  assert.deepEqual(ev.fileOperations, [
+    {
+      kind: "update",
+      path: path.resolve("/tmp/demo/foo.ts"),
+    },
+  ]);
+
+  assert.equal(parser.parse(JSON.stringify(session), "/tmp/chat.json").length, 0);
 });

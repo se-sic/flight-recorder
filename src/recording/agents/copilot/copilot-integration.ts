@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { CopilotChatSessionWatcher } from "./chat-session";
 import { CopilotLogParser } from "./parser";
 import {
   AssistantIntegration,
@@ -151,6 +152,7 @@ export class CopilotIntegration implements AssistantIntegration {
       logFile,
       logSnapshotPrefix: this.logSnapshotPrefix,
       parser: new CopilotLogParser(),
+      runtimeEventSources: [new CopilotChatSessionWatcher(context)],
     };
   }
 

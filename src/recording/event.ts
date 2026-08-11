@@ -27,6 +27,24 @@ export type FileOperation = {
   path: string;
 };
 
+export type EditOrigin =
+  | "human"
+  | "assistant-inline-completion"
+  | "assistant-agent-chat"
+  | "assistant-tool-edit"
+  | "assistant-unknown"
+  | "mixed";
+
+export type AttributionEvidence = {
+  type: string;
+  confidence?: "high" | "medium" | "low";
+  requestId?: string;
+  sessionId?: string;
+  path?: string;
+  timestamp?: string;
+  details?: Record<string, unknown>;
+};
+
 export type AssistantSource = {
   assistantId: string;
   adapterId: string;
@@ -43,6 +61,8 @@ export type AssistantEvent = {
   sessionId?: string;
   toolName?: string;
   cursorPosition?: CursorPosition;
+  origin?: EditOrigin;
+  evidence?: AttributionEvidence[];
   metadata?: Record<string, unknown>;
 };
 
@@ -113,6 +133,8 @@ export function formatAssistantEventJson(
       formatFileOperation(operation, repoRoot)
     ),
     cursorPosition: ev.cursorPosition,
+    origin: ev.origin,
+    evidence: ev.evidence,
     requestId: ev.requestId,
     sessionId: ev.sessionId,
     toolName: ev.toolName,
