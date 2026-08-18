@@ -49,6 +49,7 @@ type PendingOwnership = {
 const BLAME_HEADER_RE =
   /^(\^?[0-9a-f]{40}|0{40})\s+\d+\s+(\d+)(?:\s+\d+)?$/i;
 
+/** Creates an in-progress ownership record for a blame header line, before its author/summary fields are filled in. */
 function createPendingOwnership(
   commitHash: string,
   finalLineNumber: number
@@ -63,6 +64,7 @@ function createPendingOwnership(
   };
 }
 
+/** Shortens a commit hash for display, rendering the all-zero working-tree hash as "working-tree". */
 export function shortCommitHash(commitHash: string): string {
   if (/^0{40}$/.test(commitHash)) {
     return "working-tree";
@@ -71,6 +73,7 @@ export function shortCommitHash(commitHash: string): string {
   return commitHash.replace(/^\^/, "").slice(0, 8);
 }
 
+/** Parses `git blame --porcelain` output into a per-line list of commit ownership records. */
 export function parseGitBlamePorcelain(
   porcelain: string
 ): CommitLineOwnership[] {
@@ -124,6 +127,7 @@ export function parseGitBlamePorcelain(
   return result.sort((a, b) => a.finalLineNumber - b.finalLineNumber);
 }
 
+/** Groups consecutive per-line ownership records sharing the same commit into contiguous line-range segments. */
 export function groupCommitOwnershipSegments(
   ownership: CommitLineOwnership[]
 ): CommitOwnershipSegment[] {
@@ -159,6 +163,11 @@ export function groupCommitOwnershipSegments(
   return segments;
 }
 
+/**
+ * Aggregates per-commit line counts from ownership segments and ranks
+ * commits oldest-to-newest (uncommitted working-tree changes always last),
+ * for use in the legend and rank-based coloring.
+ */
 export function buildCommitAgeEntries(
   segments: CommitOwnershipSegment[]
 ): CommitAgeEntry[] {
@@ -213,6 +222,11 @@ export function buildCommitAgeEntries(
   }));
 }
 
+/**
+ * Same as {@link buildCommitAgeEntries}, but built from per-line-and-column
+ * ownership ranges (as produced by {@link buildFileOwnershipRanges} in
+ * `blame.ts`) instead of contiguous line segments.
+ */
 export function buildCommitAgeEntriesFromRanges(
   ranges: CommitRangeLike[]
 ): CommitAgeEntry[] {

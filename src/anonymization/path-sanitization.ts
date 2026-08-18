@@ -25,18 +25,22 @@ const COPILOT_USER_REGEX_PATTERNS = {
   accountLabel: String.raw`("accountLabel"\s*:\s*")([^"]+)(")`,
 } as const;
 
+/** Formats a literal-match rule line for `git filter-repo --replace-text`. */
 function replaceTextLine(search: string, replacement: string): string {
   return `${search}==>${replacement}`;
 }
 
+/** Formats a regex-match rule line for `git filter-repo --replace-text`. */
 function regexReplaceTextLine(search: string, replacement: string): string {
   return `regex:${search}==>${replacement}`;
 }
 
+/** Renders a string as a Python bytes-literal source expression. */
 function pythonBytesLiteral(value: string): string {
   return `b${JSON.stringify(value)}`;
 }
 
+/** Returns whether a character (or end-of-string) may precede a path start. */
 function isPathBoundary(char: string | undefined): boolean {
   return (
     char === undefined ||
@@ -45,6 +49,7 @@ function isPathBoundary(char: string | undefined): boolean {
   );
 }
 
+/** Splits off trailing punctuation (e.g. a sentence-ending period) from a matched path candidate. */
 function trimTrailingPunctuation(value: string): { core: string; trailing: string } {
   const match = value.match(/^(.*?)([.,;:!?)}\]]*)$/);
   if (!match) {
@@ -53,6 +58,7 @@ function trimTrailingPunctuation(value: string): { core: string; trailing: strin
   return { core: match[1], trailing: match[2] };
 }
 
+/** Replaces `file://` URIs in text with a placeholder. */
 function replaceFileUris(text: string): string {
   return text.replace(
     new RegExp(ABSOLUTE_PATH_REGEX_PATTERNS.fileUri, "g"),
@@ -60,6 +66,7 @@ function replaceFileUris(text: string): string {
   );
 }
 
+/** Replaces quoted POSIX and Windows absolute paths in text with a placeholder. */
 function replaceQuotedAbsolutePaths(text: string): string {
   return text
     .replace(
@@ -72,6 +79,7 @@ function replaceQuotedAbsolutePaths(text: string): string {
     );
 }
 
+/** Replaces unquoted Windows absolute paths (e.g. `C:\...`) in text with a placeholder. */
 function replaceWindowsAbsolutePaths(text: string): string {
   return text.replace(
     new RegExp(ABSOLUTE_PATH_REGEX_PATTERNS.windows, "g"),
@@ -85,6 +93,11 @@ function replaceWindowsAbsolutePaths(text: string): string {
   );
 }
 
+/**
+ * Replaces unquoted POSIX absolute paths (e.g. `/home/...`) in text with a
+ * placeholder. Scans character-by-character rather than with a single regex
+ * because path boundaries depend on the preceding character.
+ */
 function replacePosixAbsolutePaths(text: string): string {
   let out = "";
 
@@ -125,6 +138,7 @@ function replacePosixAbsolutePaths(text: string): string {
   return out;
 }
 
+/** Replaces Copilot log lines that reveal a signed-in username/account label with a placeholder. */
 function replaceCopilotUserIdentifiers(text: string): string {
   return text
     .replace(
@@ -141,6 +155,11 @@ function replaceCopilotUserIdentifiers(text: string): string {
     );
 }
 
+/**
+ * Builds `git filter-repo --replace-text` rule lines that replace every
+ * textual form of the repository root path (absolute, POSIX/Windows
+ * separators, escaped, and file URI variants) with a repo-root placeholder.
+ */
 function repoRootReplacementExpressions(repoRoot: string): string[] {
   const rootAbs = path.resolve(repoRoot);
   const rootPosix = rootAbs.replace(/\\/g, "/");
@@ -166,6 +185,11 @@ function repoRootReplacementExpressions(repoRoot: string): string[] {
   ];
 }
 
+/**
+ * Same textual variants as {@link repoRootReplacementExpressions}, but as
+ * plain (search, replacement) string pairs for direct in-memory substitution,
+ * sorted longest-first so nested prefixes are replaced correctly.
+ */
 function repoRootReplacementPairs(repoRoot: string): Array<[string, string]> {
   const rootAbs = path.resolve(repoRoot);
   const rootPosix = rootAbs.replace(/\\/g, "/");
@@ -186,6 +210,7 @@ function repoRootReplacementPairs(repoRoot: string): Array<[string, string]> {
   return pairs.sort((a, b) => b[0].length - a[0].length);
 }
 
+/** Replaces every textual occurrence of the repository root path in `text` with a placeholder. */
 function replaceRepoRootPrefixes(text: string, repoRoot: string): string {
   let result = text;
   for (const [pattern, replacement] of repoRootReplacementPairs(repoRoot)) {
@@ -194,6 +219,11 @@ function replaceRepoRootPrefixes(text: string, repoRoot: string): string {
   return result;
 }
 
+/**
+ * Builds `git filter-repo --replace-text` rule lines that scrub every
+ * absolute path and file URI found anywhere in file contents, regardless of
+ * whether it falls under the repository root.
+ */
 function allAbsolutePathReplacementExpressions(): string[] {
   return [
     regexReplaceTextLine(
@@ -219,18 +249,28 @@ function allAbsolutePathReplacementExpressions(): string[] {
   ];
 }
 
+/** Replaces every recognized absolute path form (quoted, Windows, POSIX, file URI) in text with a placeholder. */
 export function sanitizeAbsolutePaths(text: string): string {
   return replacePosixAbsolutePaths(
     replaceWindowsAbsolutePaths(replaceQuotedAbsolutePaths(replaceFileUris(text)))
   );
 }
 
+/**
+ * Applies the full in-memory sanitization pipeline used for generated
+ * recorder artifacts (`.log`/`.chat-log` content): repo-root scrubbing,
+ * absolute-path scrubbing, and Copilot username scrubbing.
+ */
 export function sanitizeGeneratedLogContent(text: string, repoRoot: string): string {
   return replaceCopilotUserIdentifiers(
     sanitizeAbsolutePaths(replaceRepoRootPrefixes(text, repoRoot))
   );
 }
 
+/**
+ * Builds the `git filter-repo --replace-text` rule lines for the given
+ * absolute-path handling mode: none, repo-root-only, or all absolute paths.
+ */
 export function absolutePathReplacementExpressions(
   repoRoot: string,
   handling: AbsolutePathHandling
@@ -247,6 +287,12 @@ export function absolutePathReplacementExpressions(
   }
 }
 
+/**
+ * Generates the Python source body for a `git filter-repo
+ * --file-info-callback` that sanitizes generated `.log`/`.chat-log` blobs
+ * in-place (repo-root, absolute-path, and Copilot-username scrubbing) while
+ * leaving all other files untouched.
+ */
 export function generatedLogSanitizationCallback(repoRoot: string): string {
   const repoRootPairs = repoRootReplacementPairs(repoRoot);
   const prefixes = GENERATED_LOG_PREFIXES.map((prefix) => pythonBytesLiteral(prefix)).join(", ");

@@ -10,10 +10,16 @@ import { getLogChannel } from "../utils/logging";
 import { getWorkspaceRepoRoot } from "../utils/paths";
 import { EXTENSION_NAME } from "../utils/constants";
 
+/** Opens the git-filter-repo installation guide in the user's default browser. */
 async function openGitFilterRepoInstallInstructions(): Promise<void> {
   await vscode.env.openExternal(vscode.Uri.parse(GIT_FILTER_REPO_INSTALL_URL));
 }
 
+/**
+ * Makes sure a usable git-filter-repo executable exists in the extension's
+ * private storage, installing it (with a progress notification) if needed.
+ * Returns the executable path, or null if it could not be made available.
+ */
 async function ensureGitFilterRepoDependency(
   context: vscode.ExtensionContext
 ): Promise<string | null> {
@@ -58,6 +64,11 @@ async function ensureGitFilterRepoDependency(
   return null;
 }
 
+/**
+ * Entry point for the "Anonymize Repository" command: validates workspace
+ * trust and git-filter-repo availability, then creates an anonymized mirror
+ * of the current repository and reports the outcome to the user.
+ */
 export async function runAnonymization(
   context: vscode.ExtensionContext
 ): Promise<void> {

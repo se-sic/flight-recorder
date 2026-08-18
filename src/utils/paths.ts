@@ -4,7 +4,9 @@ import * as vscode from "vscode";
 
 export const LOG_EXPORT_PATH = ".log/"
 export const CHAT_EXPORT_PATH = ".chat-log/";
+const EXTHOST_DIR_PATTERN = /^exthost\d*$/i;
 
+/** Returns the first opened workspace folder's path, showing an error and returning null if none is open. */
 export function getWorkspaceRepoRoot(errorMessage: string): string | null {
   const repoFolder = vscode.workspace.workspaceFolders?.[0];
   if (!repoFolder) {
@@ -15,16 +17,31 @@ export function getWorkspaceRepoRoot(errorMessage: string): string | null {
   return repoFolder.uri.fsPath;
 }
 
+/**
+ * Walks up from the extension's log directory to find the current window's
+ * extension-host log directory (named `exthost` or `exthost<N>` depending on
+ * VS Code build), which is where per-extension log files live.
+ */
 export function getWindowLogDirFromContext(
   context: vscode.ExtensionContext
 ): string | null {
   let cur = context.logUri.fsPath;
 
-  // Walk up until we find a folder containing "exthost"
+  // Walk up until we find a folder containing an extension-host log
+  // directory. Desktop VS Code names it "exthost1"; other builds have used
+  // plain "exthost", so match either.
   for (let i = 0; i < 8; i++) {
-    const exthost = path.join(cur, "exthost");
-    if (fs.existsSync(exthost) && fs.statSync(exthost).isDirectory()) {
-      return cur; // this is .../logs/<timestamp>/windowXX
+    let entries: fs.Dirent[] = [];
+    try {
+      entries = fs.readdirSync(cur, { withFileTypes: true });
+    } catch {
+      entries = [];
+    }
+    const exthostEntry = entries.find(
+      (entry) => entry.isDirectory() && EXTHOST_DIR_PATTERN.test(entry.name)
+    );
+    if (exthostEntry) {
+      return path.join(cur, exthostEntry.name); // .../logs/<timestamp>/exthostN
     }
     const parent = path.dirname(cur);
     if (parent === cur) break;
@@ -34,10 +51,15 @@ export function getWindowLogDirFromContext(
   return null;
 }
 
+/**
+ * Locates the most likely GitHub Copilot Chat log file inside an
+ * extension-host log directory, scoring candidates by filename pattern,
+ * size, and recency, with fallbacks for less common VS Code log layouts.
+ */
 export async function getCopilotLogFile(
   logDir: vscode.Uri
 ): Promise<string | null> {
-  const exthostDir = path.join(logDir.fsPath, "exthost");
+  const exthostDir = logDir.fsPath;
   if (!fs.existsSync(exthostDir)) return null;
 
   const extDirs = ["GitHub.copilot-chat", "GitHub.copilot"];

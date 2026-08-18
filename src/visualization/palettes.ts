@@ -23,6 +23,7 @@ export type QualitativePalette = {
 
 // --- Utilities ---
 
+/** Converts a `#rrggbb` hex color plus an alpha value into an `rgba(...)` CSS color string. */
 export function hexToRgba(hex: string, alpha: number): string {
   const r = parseInt(hex.slice(1, 3), 16);
   const g = parseInt(hex.slice(3, 5), 16);
@@ -30,6 +31,7 @@ export function hexToRgba(hex: string, alpha: number): string {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
+/** Linearly interpolates a hex color `t` of the way toward an RGB target, returning an `rgba(...)` string with the given alpha. */
 export function hexMix(hex: string, toward: readonly [number, number, number], t: number, alpha: number): string {
   const r = Math.round(parseInt(hex.slice(1, 3), 16) * (1 - t) + toward[0] * t);
   const g = Math.round(parseInt(hex.slice(3, 5), 16) * (1 - t) + toward[1] * t);
@@ -37,6 +39,7 @@ export function hexMix(hex: string, toward: readonly [number, number, number], t
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
+/** Samples a color from a sequential palette's gradient stops at a normalized [0,1] position, for the given theme. */
 export function sampleSequential(palette: SequentialPalette, normalized: number, isDark: boolean): string {
   const { start, end } = isDark ? palette.dark : palette.light;
   const pos = start + normalized * (end - start);
@@ -126,6 +129,7 @@ export const SEQUENTIAL_PALETTES: readonly SequentialPalette[] = [
 
 export const DEFAULT_SEQUENTIAL_PALETTE_VALUE = "sunset";
 
+/** Looks up a sequential palette by its identifier, falling back to the first palette if not found. */
 export function findSequentialPalette(value: string): SequentialPalette {
   return SEQUENTIAL_PALETTES.find((p) => p.value === value) ?? SEQUENTIAL_PALETTES[0];
 }
@@ -177,6 +181,7 @@ export const QUALITATIVE_PALETTES: readonly QualitativePalette[] = [
 
 export const DEFAULT_QUALITATIVE_PALETTE_VALUE = "vibrant";
 
+/** Looks up a qualitative palette by its identifier, falling back to the first palette if not found. */
 export function findQualitativePalette(value: string): QualitativePalette {
   return QUALITATIVE_PALETTES.find((p) => p.value === value) ?? QUALITATIVE_PALETTES[0];
 }

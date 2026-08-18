@@ -28,6 +28,7 @@ export type DecorationBucket = {
   options: vscode.DecorationOptions[];
 };
 
+/** Formats a Unix author timestamp (seconds) as a locale date string, or "unknown date" if absent. */
 function formatAuthorDate(authorTime: number | null): string {
   if (authorTime === null) {
     return "unknown date";
@@ -35,6 +36,7 @@ function formatAuthorDate(authorTime: number | null): string {
   return new Date(authorTime * 1000).toLocaleString();
 }
 
+/** Builds the markdown hover tooltip shown for a decorated commit-ownership range. */
 export function buildHoverMessage(
   commitHash: string,
   summary: string,
@@ -57,6 +59,7 @@ export function buildHoverMessage(
   return hover;
 }
 
+/** Creates a VS Code decoration type for a commit's palette and block-shape variant (inline vs. block start/middle/end). */
 export function createDecorationType(
   palette: CommitDecorationPalette,
   variant: DecorationVariant,
@@ -92,6 +95,11 @@ export function createDecorationType(
   });
 }
 
+/**
+ * Converts raw per-line commit ownership ranges into visual ranges, merging
+ * consecutive whole-line ranges owned by the same commit into a single
+ * multi-line range.
+ */
 export function buildVisualOwnershipRanges(
   editor: vscode.TextEditor,
   ranges: CommitOwnershipRange[]
@@ -134,6 +142,7 @@ export function buildVisualOwnershipRanges(
   return visualRanges;
 }
 
+/** Returns whether a visual ownership range spans the full text of its line(s). */
 function isWholeLineRange(
   editor: vscode.TextEditor,
   range: VisualOwnershipRange
@@ -152,6 +161,7 @@ function isWholeLineRange(
   );
 }
 
+/** Determines which decoration shape variant a range should use: inline for partial lines, block variants otherwise. */
 export function decorationVariantForRange(
   editor: vscode.TextEditor,
   range: VisualOwnershipRange
@@ -165,6 +175,7 @@ export function decorationVariantForRange(
   return "blockStart";
 }
 
+/** Builds the VS Code editor Range for a visual ownership range, shaped according to its decoration variant. */
 function buildDecorationRange(
   editor: vscode.TextEditor,
   range: VisualOwnershipRange,
@@ -194,6 +205,7 @@ function buildDecorationRange(
   );
 }
 
+/** Finds the commit hash of the ownership range containing the given cursor position, or null if none matches. */
 export function findCommitAtPosition(
   ranges: VisualOwnershipRange[],
   position: vscode.Position
@@ -225,6 +237,13 @@ export function findCommitAtPosition(
   return null;
 }
 
+/**
+ * Builds the full set of decoration types and options for every visible
+ * ownership range, grouped by commit and then by decoration variant.
+ * Multi-line whole-line ranges are split into contiguous non-empty-line
+ * runs so blank lines stay undecorated and each run gets correct border
+ * shaping (start/middle/end).
+ */
 export function buildDecorationBuckets(
   editor: vscode.TextEditor,
   visualRanges: VisualOwnershipRange[],
@@ -343,6 +362,7 @@ export function buildDecorationBuckets(
   return decorationsByCommit;
 }
 
+/** Builds emphasized decoration buckets highlighting the ranges owned by the currently selected commit. */
 export function buildSelectedDecorationBuckets(
   editor: vscode.TextEditor,
   selectedRanges: VisualOwnershipRange[],

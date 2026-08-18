@@ -40,6 +40,7 @@ export type AnonymizeRepoOptions = {
   gitFilterRepoExecutablePath: string;
 };
 
+/** Runs an external command and collects its exit code, stdout, and stderr. */
 function runCommand(
   command: string,
   args: string[],
@@ -61,18 +62,22 @@ function runCommand(
   });
 }
 
+/** Returns the pinned `pip install` package spec for git-filter-repo. */
 function gitFilterRepoPackageSpec(): string {
   return `git-filter-repo==${GIT_FILTER_REPO_VERSION}`;
 }
 
+/** Root directory under extension global storage where the private git-filter-repo toolchain lives. */
 function gitFilterRepoToolRoot(globalStoragePath: string): string {
   return path.join(globalStoragePath, "tools", "git-filter-repo");
 }
 
+/** Path to the private Python virtual environment used for git-filter-repo. */
 function gitFilterRepoVenvPath(globalStoragePath: string): string {
   return path.join(gitFilterRepoToolRoot(globalStoragePath), "venv");
 }
 
+/** Path to the Python interpreter inside the private git-filter-repo virtual environment. */
 function gitFilterRepoVenvPythonPath(globalStoragePath: string): string {
   const venvPath = gitFilterRepoVenvPath(globalStoragePath);
   return process.platform === "win32"
@@ -80,6 +85,7 @@ function gitFilterRepoVenvPythonPath(globalStoragePath: string): string {
     : path.join(venvPath, "bin", "python");
 }
 
+/** Path to the git-filter-repo executable installed inside the private virtual environment. */
 function gitFilterRepoExecutablePath(globalStoragePath: string): string {
   const venvPath = gitFilterRepoVenvPath(globalStoragePath);
   return process.platform === "win32"
@@ -87,6 +93,7 @@ function gitFilterRepoExecutablePath(globalStoragePath: string): string {
     : path.join(venvPath, "bin", "git-filter-repo");
 }
 
+/** Lists candidate Python 3 launcher commands to try, in priority order for the current platform. */
 function pythonCommandCandidates(): PythonCommandCandidate[] {
   if (process.platform === "win32") {
     return [
@@ -102,6 +109,7 @@ function pythonCommandCandidates(): PythonCommandCandidate[] {
   ];
 }
 
+/** Finds the first working Python 3 launcher command on this machine, or null if none work. */
 async function findPythonCommand(
   cwd: string
 ): Promise<PythonCommandCandidate | null> {
@@ -119,11 +127,13 @@ async function findPythonCommand(
   return null;
 }
 
+/** Extracts the `Version:` field from `pip show` output, or null if absent. */
 function extractInstalledGitFilterRepoVersion(pipShowOutput: string): string | null {
   const match = /^Version:\s*(.+)$/m.exec(pipShowOutput);
   return match ? match[1].trim() : null;
 }
 
+/** Reads the installed git-filter-repo version from the private virtual environment, or null if not installed. */
 async function readInstalledGitFilterRepoVersion(
   globalStoragePath: string
 ): Promise<string | null> {
@@ -144,6 +154,7 @@ async function readInstalledGitFilterRepoVersion(
   return extractInstalledGitFilterRepoVersion(res.out);
 }
 
+/** Checks whether the private git-filter-repo installation exists, matches the pinned version, and runs. */
 async function hasUsablePrivateGitFilterRepoInstallation(
   globalStoragePath: string
 ): Promise<boolean> {
@@ -163,6 +174,10 @@ async function hasUsablePrivateGitFilterRepoInstallation(
   return res.code === 0;
 }
 
+/**
+ * Creates a private Python virtual environment under the extension's global
+ * storage and installs the pinned git-filter-repo version into it.
+ */
 export async function installGitFilterRepo(
   globalStoragePath: string,
   output: vscode.OutputChannel
@@ -244,6 +259,7 @@ export async function installGitFilterRepo(
   };
 }
 
+/** Generates a unique, timestamp-based destination repo name that does not leak the original repo name. */
 function anonymizedRepoName(): string {
   // Use a generic timestamp-based name so the anonymized output path does not
   // reveal the original repository name while still remaining unique.
@@ -251,6 +267,7 @@ function anonymizedRepoName(): string {
   return `anonymous-repo-${stamp}`;
 }
 
+/** Generates a stable, distinct placeholder author/committer identity for the given index. */
 function anonymizedIdentityForIndex(index: number): string {
   // Keep the first placeholder short, then append stable numeric suffixes for
   // additional unique identities so different original people stay distinct.
@@ -259,6 +276,7 @@ function anonymizedIdentityForIndex(index: number): string {
   return `Anonymous Developer${suffix} <anonymous${emailSuffix}@example.invalid>`;
 }
 
+/** Builds a failure result combining a human-readable message with the command's stderr/stdout. */
 function formatGitFailure(msg: string, err: string, out: string): AnonymizeRepoResult {
   // Most git commands report useful details on stderr, but some also emit
   // relevant context on stdout, so combine both for the surfaced error.
@@ -270,12 +288,14 @@ function formatGitFailure(msg: string, err: string, out: string): AnonymizeRepoR
   };
 }
 
+/** Best-effort recursive removal of a path, ignoring errors if it does not exist. */
 async function removePathIfPresent(targetPath: string): Promise<void> {
   // Best-effort cleanup helper for temp directories or partially created
   // destination repositories after a failed anonymization run.
   await fs.promises.rm(targetPath, { recursive: true, force: true });
 }
 
+/** Collects every unique author and committer identity ("Name <email>") across all history in the repo. */
 async function collectRepoIdentities(repoPath: string): Promise<Set<string>> {
   // Query every author and committer identity that appears anywhere in history.
   // Using both author and committer fields preserves distinctions introduced by
@@ -299,6 +319,10 @@ async function collectRepoIdentities(repoPath: string): Promise<Set<string>> {
   );
 }
 
+/**
+ * Reports whether a usable, correctly versioned git-filter-repo installation
+ * already exists in the extension's private storage.
+ */
 export async function checkGitFilterRepoAvailable(
   globalStoragePath: string
 ) : Promise<GitFilterRepoAvailabilityResult> {

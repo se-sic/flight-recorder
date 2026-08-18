@@ -2,13 +2,13 @@
   "name": "flight-recorder",
   "publisher": "SE-SIC",
   "displayName": "Flight Recorder",
-  "description": "Records interactions with GitHub Copilot",
+  "description": "Records interactions with AI coding assistants",
   "icon": "assets/icon.png",
   "repository": {
 		"type": "git",
 		"url": "https://github.com/se-sic/flight-recorder"
 	},
-  "version": "0.2.3",
+  "version": "0.3.0",
   "activationEvents": [
     "onStartupFinished"
   ],
@@ -33,11 +33,15 @@
       },
       {
         "command": "flightRecorder.printLog",
-        "title": "Flight Recorder: Print Copilot Log Path"
+        "title": "Flight Recorder: Print Assistant Log Path"
       },
       {
         "command": "flightRecorder.exportAllChats",
         "title": "Flight Recorder: Export All Chats"
+      },
+      {
+        "command": "flightRecorder.configureClaudeHooks",
+        "title": "Flight Recorder: Configure Claude Hooks"
       },
       {
         "command": "flightRecorder.anonymizeRepo",
@@ -67,7 +71,52 @@
       "properties": {
         "flightRecorder.debounceMs": {
           "type": "number",
-          "default": 1000
+          "default": 1000,
+          "description": "Assistant-window debounce in milliseconds. Human edits are staged continuously until an assistant event is detected; after that, subsequent tracked changes stay attributed to the assistant until this idle timeout expires."
+        },
+        "flightRecorder.activeIntegration": {
+          "type": "string",
+          "enum": [
+            "github-copilot",
+            "claude-code",
+            "askOnStartup"
+          ],
+          "enumDescriptions": [
+            "Always record GitHub Copilot.",
+            "Always record Claude Code.",
+            "Prompt for which assistant to monitor each time recording starts."
+          ],
+          "default": "github-copilot",
+          "description": "Selects which assistant integration Flight Recorder uses for recording and primary log discovery."
+        },
+        "flightRecorder.claudeSource": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "transcript",
+            "hookLog"
+          ],
+          "default": "hookLog",
+          "description": "For the Claude Code integration, choose whether Flight Recorder should prefer a configured hook log, the local transcript store, or auto-detect between them."
+        },
+        "flightRecorder.claudeHookLogPath": {
+          "type": "string",
+          "default": ".claude/flight-recorder-hooks.jsonl",
+          "description": "For the Claude Code integration, path to a JSONL hook log file. Relative paths are resolved against the repository root."
+        },
+        "flightRecorder.claudeConfigDir": {
+          "type": "string",
+          "default": "",
+          "description": "Optional override for the Claude Code configuration directory. When empty, Flight Recorder uses CLAUDE_CONFIG_DIR if set, otherwise ~/.claude."
+        },
+        "flightRecorder.claudeMissingSourceBehavior": {
+          "type": "string",
+          "enum": [
+            "wait",
+            "fail"
+          ],
+          "default": "wait",
+          "description": "Controls what happens when the Claude Code integration cannot find a repo-specific transcript or hook log yet. 'wait' starts recording and attaches once the source appears; 'fail' aborts startup immediately."
         },
         "flightRecorder.addAll": {
           "type": "boolean",

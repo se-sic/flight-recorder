@@ -19,6 +19,7 @@ export type LegendPanelCallbacks = {
   onDispose: () => void;
 };
 
+/** Formats a Unix author timestamp (seconds) as a locale date string, or "unknown date" if absent. */
 function formatAuthorDate(authorTime: number | null): string {
   if (authorTime === null) {
     return "unknown date";
@@ -26,6 +27,7 @@ function formatAuthorDate(authorTime: number | null): string {
   return new Date(authorTime * 1000).toLocaleString();
 }
 
+/** Escapes text for safe embedding in the legend webview's HTML. */
 function escapeHtml(value: string): string {
   return value
     .replace(/&/g, "&amp;")
@@ -35,10 +37,12 @@ function escapeHtml(value: string): string {
     .replace(/'/g, "&#39;");
 }
 
+/** Pluralizes a line count for display (e.g. "1 line" vs "3 lines"). */
 function lineLabel(lineCount: number): string {
   return lineCount === 1 ? "1 line" : `${lineCount} lines`;
 }
 
+/** Describes a commit's position within the ranked commit list in human terms (oldest/newest/Nth of total). */
 function rankLabel(rank: number, total: number): string {
   if (total <= 1) {
     return "only commit in file";
@@ -52,6 +56,7 @@ function rankLabel(rank: number, total: number): string {
   return `${rank + 1} of ${total}`;
 }
 
+/** Builds the legend webview HTML for the empty state (no active visualization), showing the given reason. */
 export function buildLegendEmptyHtml(reason: string): string {
   return `<!DOCTYPE html>
 <html lang="en">
@@ -76,6 +81,12 @@ export function buildLegendEmptyHtml(reason: string): string {
 </html>`;
 }
 
+/**
+ * Builds the full legend webview HTML: the commit list (with swatches,
+ * hashes, summaries, and authorship), the coloring-mode and palette
+ * selectors, and the client-side script that posts selection changes back
+ * to the extension and keeps the selected commit scrolled into view.
+ */
 export function buildLegendHtml(
   filePath: string,
   commits: ReturnType<typeof buildCommitAgeEntriesFromRanges>,
@@ -261,6 +272,7 @@ export function buildLegendHtml(
 </html>`;
 }
 
+/** Sets the legend webview panel's HTML content, if the panel exists. */
 export function setLegendHtml(
   panel: vscode.WebviewPanel | null,
   html: string
@@ -271,6 +283,11 @@ export function setLegendHtml(
   panel.webview.html = html;
 }
 
+/**
+ * Returns the existing legend panel, or creates and wires up a new one
+ * (message handling for coloring-mode/palette changes, disposal callback)
+ * if none exists yet.
+ */
 export function ensureLegendPanel(
   panel: vscode.WebviewPanel | null,
   extensionContext: vscode.ExtensionContext | null,

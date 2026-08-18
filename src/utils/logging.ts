@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 
 let globalOutputChannel: vscode.LogOutputChannel | null = null;
 
+/** Creates, shows, and registers the extension's single global log output channel. */
 export function initializeLogChannel(
   channelName: string
 ): vscode.LogOutputChannel {
@@ -12,6 +13,7 @@ export function initializeLogChannel(
   return globalOutputChannel;
 }
 
+/** Returns the global log output channel. Throws if `initializeLogChannel` has not run yet. */
 export function getLogChannel(): vscode.LogOutputChannel {
   if (!globalOutputChannel) {
     throw new Error(

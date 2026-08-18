@@ -3,59 +3,90 @@ import * as vscode from "vscode";
 import { exportCurrentWorkspaceChats } from "./chat-export";
 import {
   commitChatExportSnapshot,
-  commitCopilotLogSnapshot,
-  commitForEvent,
-  commitForEvents,
+  commitTrackedWindow,
+  commitAssistantLogSnapshot,
   GitActionResult,
   GitFailureKind,
   validateGitRecordingReadiness,
 } from "./commits";
-import { CopilotLogParser, Tailer } from "./parser";
-import { CompletionEvent } from "./event";
-import { getLogChannel } from "../utils/logging";
+import { Tailer } from "../utils/tailer";
 import {
-  getCopilotLogFile,
-  getWindowLogDirFromContext,
-  getWorkspaceRepoRoot,
-} from "../utils/paths";
+  AssistantIntegration,
+  AssistantEventParser,
+  AssistantIntegrationSetupAction,
+  ASK_ON_STARTUP_INTEGRATION_ID,
+  getActiveAssistantIntegration,
+  getAvailableAssistantIntegrationIds,
+  getConfiguredIntegrationId,
+  pickAssistantIntegration,
+} from "./integration";
+import { AssistantEvent } from "./event";
+import {
+  FineGrainedStagingTracker,
+  hashInsertedText,
+  WindowCommit,
+  WorkspaceTextChange,
+} from "./staging-tracker";
+import { getClaudeSourceMode } from "./agents/claude/config";
+import { getLogChannel } from "../utils/logging";
+import { getWorkspaceRepoRoot } from "../utils/paths";
 import { EXTENSION_NAME } from "../utils/constants";
 
 type RecordingSession = {
   repoRoot: string;
-  logFile: string;
-  tailer: Tailer;
+  assistantId: string;
+  assistantDisplayName: string;
+  logFile: string | null;
+  logSnapshotPrefix: string;
+  tailer: Tailer | null;
+  parser: AssistantEventParser;
+  awaitLogFile: (() => Promise<string | null>) | null;
+  sourceWaitingMessageShown: boolean;
   interval: ReturnType<typeof setInterval>;
-  pending: CompletionEvent[];
-  pendingAt: number;
-  debounceMs: number;
+  tracker: FineGrainedStagingTracker;
+  subscriptions: vscode.Disposable[];
   addAll: boolean;
   allowEmpty: boolean;
   dryRun: boolean;
   shownFailureKinds: Set<GitFailureKind>;
 };
 
-type LogSetupResult =
-  | { ok: true }
-  | { ok: false; msg: string; err?: string };
-
 let running: RecordingSession | null = null;
 let stopping = false;
 let recordingStatusBarItem: vscode.StatusBarItem | null = null;
 let extensionContextRef: vscode.ExtensionContext | null = null;
+let claudeNewSessionHintShown = false;
 
-function eventFilePaths(ev: CompletionEvent): string[] {
-  return ev.files;
+/** Resolves a `file:` scheme URI to a normalized absolute path, or null for non-file URIs. */
+function normalizeFileUri(uri: vscode.Uri): string | null {
+  if (uri.scheme !== "file") {
+    return null;
+  }
+
+  return path.resolve(uri.fsPath);
 }
 
-function eventPrimaryFilePath(ev: CompletionEvent): string {
-  return ev.files[0] ?? "[unknown-file]";
+/** Filters out the session's own assistant log file from a set of tracked paths, so Flight Recorder never commits its own log as a human/assistant edit. */
+function filterInternalTrackingPaths(
+  session: RecordingSession,
+  paths: Iterable<string>
+): string[] {
+  const ignored = new Set<string>();
+  if (session.logFile) {
+    ignored.add(path.resolve(session.logFile));
+  }
+
+  return Array.from(new Set(Array.from(paths).map((candidate) => path.resolve(candidate))))
+    .sort((left, right) => left.localeCompare(right))
+    .filter((candidate) => !ignored.has(candidate));
 }
 
-async function saveEventFilesIfOpen(
-  ev: CompletionEvent
+/** Saves any open, dirty editor documents among the given paths, so a commit captures their current content. */
+async function saveTrackedFilesIfOpen(
+  pathsToSave: Iterable<string>
 ): Promise<void> {
   const targetPaths = Array.from(
-    new Set(eventFilePaths(ev).map((p) => path.resolve(p)))
+    new Set(Array.from(pathsToSave).map((p) => path.resolve(p)))
   );
 
   for (const targetPath of targetPaths) {
@@ -81,6 +112,158 @@ async function saveEventFilesIfOpen(
   }
 }
 
+/** Opens and attaches a log file tailer (positioned at end-of-file) to the recording session. */
+function attachLogSource(
+  session: RecordingSession,
+  logFile: string,
+  parser: AssistantEventParser
+): boolean {
+  const tailer = new Tailer(logFile);
+  try {
+    tailer.open();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    getLogChannel().error(`Failed to open log file: ${msg}`);
+    return false;
+  }
+
+  tailer.startFromEnd();
+  session.logFile = logFile;
+  session.tailer = tailer;
+  session.parser = parser;
+  session.awaitLogFile = null;
+  getLogChannel().info(
+    `Attached ${session.assistantDisplayName} log source: ${logFile}`
+  );
+  return true;
+}
+
+/**
+ * Saves any dirty files in a window commit, commits it, and reports the
+ * result. Stops recording and shows an error if git turns out to be
+ * unavailable. Returns whether recording was stopped.
+ */
+async function commitTrackedWindowAndReport(
+  session: RecordingSession,
+  commit: WindowCommit
+): Promise<boolean> {
+  const filteredFiles = filterInternalTrackingPaths(session, commit.files);
+  const filteredCommit = { ...commit, files: filteredFiles };
+
+  await saveTrackedFilesIfOpen(filteredCommit.files);
+
+  const result = await commitTrackedWindow(
+    session.repoRoot,
+    filteredCommit,
+    session.addAll,
+    session.allowEmpty,
+    session.dryRun
+  );
+
+  const shouldStop = reportGitActionResult(
+    result,
+    session.shownFailureKinds
+  );
+
+  if (shouldStop) {
+    await stopRecording();
+    void vscode.window.showErrorMessage(
+      `${EXTENSION_NAME} stopped because Git is unavailable for this workspace.`
+    );
+  }
+
+  return shouldStop;
+}
+
+/** Records one assistant event and commits any human window that the assistant boundary closes. */
+async function processAssistantEvent(
+  session: RecordingSession,
+  event: AssistantEvent,
+  at = Date.now()
+): Promise<boolean> {
+  const preAssistantCommits = session.tracker.recordAssistantEvent(event, at);
+
+  for (const commit of preAssistantCommits) {
+    const shouldStop = await commitTrackedWindowAndReport(session, commit);
+    if (shouldStop) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/** Registers VS Code workspace listeners (document edits, file create/delete/rename) that feed human changes into the staging tracker. */
+function registerWorkspaceChangeTracking(
+  session: RecordingSession
+): vscode.Disposable[] {
+  const trackPaths = (paths: Iterable<string>) => {
+    const filteredPaths = filterInternalTrackingPaths(session, paths);
+    if (filteredPaths.length === 0) {
+      return;
+    }
+
+    session.tracker.recordHumanChange(filteredPaths);
+  };
+
+  const trackUris = (uris: readonly vscode.Uri[]) => {
+    const paths = uris
+      .map((uri) => normalizeFileUri(uri))
+      .filter((candidate): candidate is string => candidate !== null);
+    trackPaths(paths);
+  };
+
+  return [
+    vscode.workspace.onDidChangeTextDocument((event) => {
+      const filePath = normalizeFileUri(event.document.uri);
+      if (!filePath || event.contentChanges.length === 0) {
+        return;
+      }
+
+      const filteredPaths = filterInternalTrackingPaths(session, [filePath]);
+      if (filteredPaths.length === 0) {
+        return;
+      }
+
+      const textChange: WorkspaceTextChange = {
+        path: filePath,
+        insertedTextHashes: event.contentChanges
+          .filter((change) => change.text.length > 0)
+          .map((change) => hashInsertedText(change.text)),
+        insertedTextLength: event.contentChanges.reduce(
+          (total, change) => total + change.text.length,
+          0
+        ),
+        ranges: event.contentChanges.map((change) => ({
+          startLine: change.range.start.line,
+          startColumn: change.range.start.character,
+          endLine: change.range.end.line,
+          endColumn: change.range.end.character,
+        })),
+      };
+
+      session.tracker.recordTextDocumentChange([textChange]);
+    }),
+    vscode.workspace.onDidCreateFiles((event) => {
+      trackUris(event.files);
+    }),
+    vscode.workspace.onDidDeleteFiles((event) => {
+      trackUris(event.files);
+    }),
+    vscode.workspace.onDidRenameFiles((event) => {
+      const renamePaths = event.files.flatMap((entry) => {
+        const oldPath = normalizeFileUri(entry.oldUri);
+        const newPath = normalizeFileUri(entry.newUri);
+        return [oldPath, newPath].filter(
+          (candidate): candidate is string => candidate !== null
+        );
+      });
+      trackPaths(renamePaths);
+    }),
+  ];
+}
+
+/** Updates the status bar item's text, tooltip, command, and color to reflect whether recording is active. */
 function updateRecordingStatusIndicator(active: boolean): void {
   if (!recordingStatusBarItem) {
     return;
@@ -106,6 +289,7 @@ function updateRecordingStatusIndicator(active: boolean): void {
   recordingStatusBarItem.show();
 }
 
+/** Sets the `flightRecorder.isRecording` VS Code context key, used by menu/keybinding `when` clauses. */
 async function setRecordingContext(active: boolean): Promise<void> {
   await vscode.commands.executeCommand(
     "setContext",
@@ -114,6 +298,7 @@ async function setRecordingContext(active: boolean): Promise<void> {
   );
 }
 
+/** Maps a git failure kind to a human-readable message shown to the user. */
 function gitFailureUiMessage(kind: GitFailureKind, fallback: string): string {
   switch (kind) {
     case "git_not_found":
@@ -132,6 +317,11 @@ function gitFailureUiMessage(kind: GitFailureKind, fallback: string): string {
   }
 }
 
+/**
+ * Logs a git action's result and, for failures, shows an error message the
+ * first time each failure kind occurs. Returns whether the failure is
+ * severe enough (git missing, not a repo) that recording should stop.
+ */
 function reportGitActionResult(
   result: GitActionResult,
   shownFailureKinds?: Set<GitFailureKind>
@@ -175,98 +365,7 @@ function reportGitActionResult(
   return false;
 }
 
-async function enableCopilotDebugLogging(): Promise<LogSetupResult> {
-  const output = getLogChannel();
-  try {
-    await vscode.commands.executeCommand(
-      "workbench.action.setDefaultLogLevel",
-      vscode.LogLevel.Debug,
-      "github.copilot-chat"
-    );
-    output.debug("Set default log level to debug for github.copilot-chat.");
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    output.debug(
-      `Could not set default log level for github.copilot-chat: ${msg}`
-    );
-    return {
-      ok: false,
-      msg: "Could not set the default log level to debug for GitHub Copilot Chat.",
-      err: msg,
-    };
-  }
-
-  try {
-    const commands = await vscode.commands.getCommands(true);
-
-    const debugLevelCommand =
-      commands.find((c) => c === "workbench.action.output.activeOutputLogLevel.2") ??
-      commands.find(
-        (c) => c === "workbench.action.output.activeOutputLogLevel.debug"
-      ) ??
-      null;
-
-    if (!debugLevelCommand) {
-      output.debug(
-        "Could not find output log-level debug command in this VS Code build."
-      );
-      return {
-        ok: false,
-        msg: "Could not find the VS Code command for setting the active output log level to debug.",
-      };
-    }
-
-    const copilotChatShowOutputCommand =
-      commands.find(
-        (c) =>
-          /workbench\.action\.output\.show\..*copilot-chat.*copilot chat.*\.log$/i.test(
-            c
-          )
-      ) ??
-      commands.find((c) =>
-        /workbench\.action\.output\.show\..*copilot-chat.*\.log$/i.test(c)
-      ) ??
-      null;
-
-    if (!copilotChatShowOutputCommand) {
-      output.debug(
-        "Could not find GitHub Copilot Chat log output channel command."
-      );
-      return {
-        ok: false,
-        msg: "Could not find the VS Code command for showing the GitHub Copilot Chat log output channel.",
-      };
-    }
-
-    try {
-      await vscode.commands.executeCommand(copilotChatShowOutputCommand);
-      await vscode.commands.executeCommand(debugLevelCommand);
-      output.debug(
-        `Set active output log level to debug via ${copilotChatShowOutputCommand}.`
-      );
-      return { ok: true };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      output.debug(
-        `Could not set active output log level via ${copilotChatShowOutputCommand}: ${msg}`
-      );
-      return {
-        ok: false,
-        msg: "Could not set the active GitHub Copilot Chat output log level to debug.",
-        err: msg,
-      };
-    }
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    output.debug(`Failed to discover output commands: ${msg}`);
-    return {
-      ok: false,
-      msg: "Failed to discover the VS Code commands required to enable Copilot debug logging.",
-      err: msg,
-    };
-  }
-}
-
+/** Registers the extension's status bar item and initializes it to the idle state. */
 export function initializeRecordingStatusBar(
   item: vscode.StatusBarItem
 ): void {
@@ -274,14 +373,87 @@ export function initializeRecordingStatusBar(
   updateRecordingStatusIndicator(false);
 }
 
+/** Initializes the `flightRecorder.isRecording` context key to false on activation. */
 export async function initializeRecordingContext(): Promise<void> {
   await setRecordingContext(false);
 }
 
+/** Returns whether a recording session is currently active. */
 export function isRecording(): boolean {
   return running !== null;
 }
 
+/** Resolves the configured assistant integration, showing an error and returning null if the configured ID is unknown. */
+function getConfiguredIntegrationOrShowError() {
+  const integration = getActiveAssistantIntegration();
+  if (integration) {
+    return integration;
+  }
+
+  const availableIds = getAvailableAssistantIntegrationIds();
+  const configuredId = getConfiguredIntegrationId();
+  void vscode.window.showErrorMessage(
+    `${EXTENSION_NAME} does not know the configured assistant integration "${configuredId}". Available integrations: ${availableIds.join(", ")}.`
+  );
+  return null;
+}
+
+/**
+ * Resolves which assistant integration to use for an upcoming recording
+ * session: prompts the user to pick one if `activeIntegration` is set to
+ * the ask-on-startup sentinel, otherwise uses the fixed configured
+ * integration.
+ */
+async function resolveIntegrationForStart(): Promise<AssistantIntegration | null> {
+  const configuredId = getConfiguredIntegrationId();
+  if (configuredId === ASK_ON_STARTUP_INTEGRATION_ID) {
+    return (await pickAssistantIntegration(configuredId)) ?? null;
+  }
+
+  return getConfiguredIntegrationOrShowError();
+}
+
+/** Prompts the user to run an integration's suggested setup action (e.g. configuring Claude hooks), if one was provided. */
+async function maybeRunIntegrationSetupAction(
+  action: AssistantIntegrationSetupAction | undefined
+): Promise<void> {
+  if (!action) {
+    return;
+  }
+
+  const choice = await vscode.window.showInformationMessage(
+    action.message,
+    action.title
+  );
+  if (choice === action.title) {
+    await vscode.commands.executeCommand(action.command);
+  }
+}
+
+/** Shows a one-time reminder to start a fresh Claude session when hook-log recording begins, since already-open chats keep stale hook state. */
+async function maybeShowClaudeNewSessionHint(
+  assistantId: string
+): Promise<void> {
+  if (assistantId !== "claude-code" || claudeNewSessionHintShown) {
+    return;
+  }
+
+  if (getClaudeSourceMode() !== "hookLog") {
+    return;
+  }
+
+  claudeNewSessionHintShown = true;
+  await vscode.window.showInformationMessage(
+    "Claude hook recording is active. If Claude chat was already open before hook setup, start a new Claude chat/session in this repository so the current session picks up the hook state."
+  );
+}
+
+/**
+ * Entry point for the "Start Recording" command: resolves the assistant
+ * integration and repo root, validates git readiness, prepares the
+ * integration's log source, and starts the polling loop that tails the log,
+ * feeds parsed events into the staging tracker, and commits window results.
+ */
 export async function startRecording(
   context: vscode.ExtensionContext
 ): Promise<boolean> {
@@ -291,6 +463,10 @@ export async function startRecording(
 
   extensionContextRef = context;
   const output = getLogChannel();
+  const integration = await resolveIntegrationForStart();
+  if (!integration) {
+    return false;
+  }
 
   const repoRoot = getWorkspaceRepoRoot(
     "Open a folder (git repo) before starting the recorder."
@@ -314,43 +490,26 @@ export async function startRecording(
     return false;
   }
 
-  const windowLogDir = getWindowLogDirFromContext(context);
-  if (!windowLogDir) {
+  const prepared = await integration.prepareRecording(context, repoRoot);
+  if (prepared.ok === false) {
+    output.error(`${prepared.msg}\n${prepared.err ?? ""}`);
+    await maybeRunIntegrationSetupAction(prepared.setupAction);
     vscode.window.showErrorMessage(
-      "Could not locate VS Code window log directory."
+      `${EXTENSION_NAME} could not prepare ${integration.displayName} recording. ${prepared.msg}`
     );
     return false;
   }
-  const logFile = await getCopilotLogFile(vscode.Uri.file(windowLogDir));
-  if (!logFile) {
-    vscode.window.showErrorMessage("Could not find Copilot log file.");
-    return false;
-  }
 
-  output.info(`Using log: ${logFile}`);
   output.info(`Repo: ${repoRoot}`);
-
-  const logSetup = await enableCopilotDebugLogging();
-  if (!logSetup.ok) {
-    output.error(`${logSetup.msg}\n${logSetup.err ?? ""}`);
-    vscode.window.showErrorMessage(
-      `${EXTENSION_NAME} could not enable GitHub Copilot Chat debug logging. The recorder depends on debug-level Copilot log events and may not capture completions correctly.`
-    );
-    return false;
-  }
   getLogChannel().show(true);
-
-  const parser = new CopilotLogParser();
-  const tailer = new Tailer(logFile);
-
-  try {
-    tailer.open();
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    output.error(`Failed to open log file: ${msg}`);
-    return false;
+  if (prepared.ok === true) {
+    output.info(`Using ${prepared.displayName} log: ${prepared.logFile}`);
+    await maybeShowClaudeNewSessionHint(prepared.assistantId);
+  } else {
+    output.info(prepared.waitMessage);
+    await maybeRunIntegrationSetupAction(prepared.setupAction);
+    await maybeShowClaudeNewSessionHint(prepared.assistantId);
   }
-  tailer.startFromEnd();
 
   let session: RecordingSession | null = null;
   const interval = setInterval(async () => {
@@ -358,79 +517,95 @@ export async function startRecording(
       return;
     }
 
+    if (!session.tailer) {
+      if (!session.awaitLogFile) {
+        return;
+      }
+
+      const awaitedLogFile = await session.awaitLogFile();
+      if (!awaitedLogFile) {
+        if (!session.sourceWaitingMessageShown) {
+          output.info(
+            `${session.assistantDisplayName} source is not available yet; waiting for the first assistant session in this repo.`
+          );
+          session.sourceWaitingMessageShown = true;
+        }
+        return;
+      }
+
+      const attached = attachLogSource(session, awaitedLogFile, session.parser);
+      if (!attached) {
+        return;
+      }
+    }
+
+    const tailer = session.tailer;
+    if (!tailer) {
+      return;
+    }
+
     const chunk = tailer.readNew();
     if (!chunk) {
-      if (
-        session.pending.length > 0 &&
-        debounceMs > 0 &&
-        Date.now() - session.pendingAt >= debounceMs
-      ) {
-        for (const pendingEv of session.pending) {
-          await saveEventFilesIfOpen(pendingEv);
-        }
-        const res = await commitForEvents(
-          repoRoot,
-          session.pending,
-          addAll,
-          allowEmpty,
-          dryRun
+      const idleCommit = session.tracker.flushAssistantWindowIfIdle(Date.now());
+      if (idleCommit) {
+        const shouldStop = await commitTrackedWindowAndReport(
+          session,
+          idleCommit
         );
-        const shouldStop = reportGitActionResult(
-          res,
-          session.shownFailureKinds
-        );
-        session.pending = [];
         if (shouldStop) {
-          await stopRecording();
-          void vscode.window.showErrorMessage(
-            `${EXTENSION_NAME} stopped because Git is unavailable for this workspace.`
-          );
+          return;
         }
       }
       return;
     }
 
-    for (const ev of parser.feed(chunk)) {
-      if (debounceMs > 0) {
-        session.pending.push(ev);
-        session.pendingAt = Date.now();
-      } else {
-        await saveEventFilesIfOpen(ev);
-        const res = await commitForEvent(
-          repoRoot,
-          ev,
-          addAll,
-          allowEmpty,
-          dryRun
-        );
-        const shouldStop = reportGitActionResult(
-          res,
-          session.shownFailureKinds
-        );
-        if (shouldStop) {
-          await stopRecording();
-          void vscode.window.showErrorMessage(
-            `${EXTENSION_NAME} stopped because Git is unavailable for this workspace.`
-          );
-          break;
-        }
+    for (const ev of session.parser.feed(chunk)) {
+      const shouldStop = await processAssistantEvent(session, ev);
+      if (shouldStop) {
+        return;
       }
     }
   }, 300);
 
   session = {
     repoRoot,
-    logFile,
-    tailer,
+    assistantId: prepared.assistantId,
+    assistantDisplayName: prepared.displayName,
+    logFile: prepared.ok === true ? prepared.logFile : null,
+    logSnapshotPrefix: prepared.logSnapshotPrefix,
+    tailer: null,
+    parser: prepared.parser,
+    awaitLogFile: prepared.ok === "pending" ? prepared.awaitLogFile : null,
+    sourceWaitingMessageShown: prepared.ok !== "pending",
     interval,
-    pending: [],
-    pendingAt: 0,
-    debounceMs,
+    tracker: new FineGrainedStagingTracker(debounceMs),
+    subscriptions: [],
     addAll,
     allowEmpty,
     dryRun,
     shownFailureKinds: new Set<GitFailureKind>(),
   };
+  if (prepared.ok === true && session) {
+    const attached = attachLogSource(session, prepared.logFile, prepared.parser);
+    if (!attached) {
+      clearInterval(interval);
+      return false;
+    }
+  }
+  if (!session) {
+    clearInterval(interval);
+    return false;
+  }
+  session.subscriptions = registerWorkspaceChangeTracking(session);
+  for (const source of prepared.runtimeEventSources ?? []) {
+    const disposable = await source.start((event) => {
+      if (!running || running !== session) {
+        return;
+      }
+      void processAssistantEvent(session, event);
+    });
+    session.subscriptions.push(disposable);
+  }
   running = session;
   await setRecordingContext(true);
   updateRecordingStatusIndicator(true);
@@ -438,6 +613,11 @@ export async function startRecording(
   return true;
 }
 
+/**
+ * Entry point for the "Stop Recording" command: flushes any pending human
+ * or assistant window commits, commits a final assistant-log snapshot, and
+ * optionally exports and commits chat sessions.
+ */
 export async function stopRecording(): Promise<boolean> {
   if (!running || stopping) {
     return false;
@@ -457,34 +637,35 @@ export async function stopRecording(): Promise<boolean> {
     await setRecordingContext(false);
 
     clearInterval(current.interval);
-    current.tailer.close();
+    for (const subscription of current.subscriptions) {
+      subscription.dispose();
+    }
+    current.tailer?.close();
 
-    if (current.pending.length > 0 && current.debounceMs > 0) {
-      for (const pendingEv of current.pending) {
-        await saveEventFilesIfOpen(pendingEv);
-      }
-      const pendingRes = await commitForEvents(
-        current.repoRoot,
-        current.pending,
-        current.addAll,
-        current.allowEmpty,
-        current.dryRun
-      );
-      reportGitActionResult(pendingRes, current.shownFailureKinds);
+    const pendingCommits = current.tracker.flushAll(Date.now());
+    for (const pendingCommit of pendingCommits) {
+      await commitTrackedWindowAndReport(current, pendingCommit);
     }
 
     const cfg = vscode.workspace.getConfiguration("flightRecorder");
     const forceAddGeneratedLogs = cfg.get<boolean>("forceAddGeneratedLogs", true);
-    const snapshotRes = await commitCopilotLogSnapshot(
-      current.repoRoot,
-      current.logFile,
-      current.dryRun,
-      forceAddGeneratedLogs
-    );
-    reportGitActionResult(
-      snapshotRes,
-      current.shownFailureKinds
-    );
+    if (current.logFile) {
+      const snapshotRes = await commitAssistantLogSnapshot(
+        current.repoRoot,
+        current.logFile,
+        current.logSnapshotPrefix,
+        current.dryRun,
+        forceAddGeneratedLogs
+      );
+      reportGitActionResult(
+        snapshotRes,
+        current.shownFailureKinds
+      );
+    } else {
+      output.info(
+        `No ${current.assistantDisplayName} log source was attached during this recording; skipping assistant-log snapshot commit.`
+      );
+    }
 
     const exportChatsOnStop = cfg.get<boolean>("exportChatsOnStop", false);
     if (exportChatsOnStop && !current.dryRun) {
@@ -532,22 +713,32 @@ export async function stopRecording(): Promise<boolean> {
   return true;
 }
 
-export async function showCopilotLogPath(
+/** Entry point for the "Print Assistant Log Path" command: shows the configured integration's primary log file path. */
+export async function showAssistantLogPath(
   context: vscode.ExtensionContext
 ): Promise<void> {
-  const windowLogDir = getWindowLogDirFromContext(context);
-  if (!windowLogDir) {
+  const integration = getConfiguredIntegrationOrShowError();
+  if (!integration) {
+    return;
+  }
+
+  const repoRoot = getWorkspaceRepoRoot(
+    "Open a folder (git repo) before inspecting assistant logs."
+  );
+  if (!repoRoot) {
+    return;
+  }
+
+  const logFile = await integration.showPrimaryLogPath(context, repoRoot);
+  if (!logFile) {
     vscode.window.showErrorMessage(
-      "Could not locate VS Code window log directory."
+      `Could not find the primary log file for ${integration.displayName}.`
     );
     return;
   }
-  const logFile = await getCopilotLogFile(vscode.Uri.file(windowLogDir));
-  if (!logFile) {
-    vscode.window.showErrorMessage("Could not find Copilot log file.");
-    return;
-  }
-  vscode.window.showInformationMessage(`Copilot log file: ${logFile}`);
+  vscode.window.showInformationMessage(
+    `${integration.displayName} log file: ${logFile}`
+  );
 }
 
 export async function exportAllChats(
