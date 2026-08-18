@@ -69,13 +69,17 @@ export function rankPalette(
 
 // --- Event-origin palette ---
 
-/** Infers the assistant-event origin kind from the `"origin"` fields embedded in a commit summary/body. */
+/** Infers the assistant-event origin kind from the `"origins"` array embedded in a commit summary/body. */
 export function eventOriginFromSummary(body: string): EventOriginKind {
-  const origins = new Set<string>();
-  const pattern = /"origin"\s*:\s*"([^"]+)"/g;
-  let match: RegExpExecArray | null;
-  while ((match = pattern.exec(body)) !== null) {
-    origins.add(match[1]);
+  const origins = new Set<EventOriginKind>();
+  const arrayPattern = /"origins"\s*:\s*\[([^\]]*)\]/g;
+  const valuePattern = /"([^"]+)"/g;
+  let arrayMatch: RegExpExecArray | null;
+  while ((arrayMatch = arrayPattern.exec(body)) !== null) {
+    let valueMatch: RegExpExecArray | null;
+    while ((valueMatch = valuePattern.exec(arrayMatch[1])) !== null) {
+      origins.add(mapEditOriginKind(valueMatch[1]));
+    }
   }
   if (origins.size === 0) {
     return "unknown";
@@ -84,10 +88,18 @@ export function eventOriginFromSummary(body: string): EventOriginKind {
     return "mixed";
   }
   const [origin] = [...origins];
-  if (origin === "agent-edit" || origin === "inline-completion") {
-    return origin;
+  return origin;
+}
+
+/** Maps a serialized `EditOrigin` value to its `EventOriginKind` for coloring. */
+function mapEditOriginKind(origin: string): EventOriginKind {
+  switch (origin) {
+    case "assistant-inline-completion": return "inline-completion";
+    case "assistant-agent-chat":
+    case "assistant-tool-edit": return "agent-edit";
+    case "mixed": return "mixed";
+    default: return "unknown";
   }
-  return "unknown";
 }
 
 /** Returns the human-readable label for an event origin kind. */
