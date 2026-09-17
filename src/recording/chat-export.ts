@@ -26,7 +26,8 @@ export async function safeReadDirFilesOnly(dir: string): Promise<string[]> {
  */
 export async function exportCurrentWorkspaceChats(
   context: vscode.ExtensionContext,
-  repoRoot: string
+  repoRoot: string,
+  outputRoot = repoRoot
 ): Promise<ChatExportResult> {
   const currentWsStorageUri = context.storageUri; // per-workspace storage
   if (!currentWsStorageUri) {
@@ -53,7 +54,7 @@ export async function exportCurrentWorkspaceChats(
   }
 
   const wid = path.basename(workspaceDir);
-  const destDir = path.join(repoRoot, CHAT_EXPORT_PATH, wid, "chatSessions");
+  const destDir = path.join(outputRoot, CHAT_EXPORT_PATH, wid, "chatSessions");
   await vscode.workspace.fs.createDirectory(vscode.Uri.file(destDir));
 
   for (const f of sessionFiles) {

@@ -7,6 +7,9 @@ import {
   commitAssistantLogSnapshot,
   GitActionResult,
   GitFailureKind,
+  prepareRecordingCommitTarget,
+  RecordingCommitMode,
+  RecordingCommitTarget,
   validateGitRecordingReadiness,
 } from "./commits";
 import { Tailer } from "../utils/tailer";
@@ -48,6 +51,7 @@ type RecordingSession = {
   addAll: boolean;
   allowEmpty: boolean;
   dryRun: boolean;
+  commitTarget: RecordingCommitTarget;
   shownFailureKinds: Set<GitFailureKind>;
 };
 
@@ -157,7 +161,8 @@ async function commitTrackedWindowAndReport(
     filteredCommit,
     session.addAll,
     session.allowEmpty,
-    session.dryRun
+    session.dryRun,
+    session.commitTarget
   );
 
   const shouldStop = reportGitActionResult(
@@ -480,6 +485,14 @@ export async function startRecording(
   const addAll = cfg.get<boolean>("addAll", false);
   const allowEmpty = cfg.get<boolean>("allowEmpty", false);
   const dryRun = cfg.get<boolean>("dryRun", false);
+  const commitMode = cfg.get<RecordingCommitMode>(
+    "commitMode",
+    "trackingWorktree"
+  );
+  const trackingBranchPrefix = cfg.get<string>(
+    "trackingBranchPrefix",
+    "flight-recorder"
+  );
 
   const readiness = await validateGitRecordingReadiness(repoRoot, dryRun);
   if (!readiness.ok) {
@@ -488,6 +501,28 @@ export async function startRecording(
       gitFailureUiMessage(readiness.kind, readiness.msg)
     );
     return false;
+  }
+
+  const commitTargetResult = await prepareRecordingCommitTarget(
+    repoRoot,
+    dryRun,
+    {
+      mode: commitMode,
+      trackingBranchPrefix,
+    }
+  );
+  if (!commitTargetResult.ok) {
+    output.error(`${commitTargetResult.msg}\n${commitTargetResult.err}`);
+    vscode.window.showErrorMessage(
+      gitFailureUiMessage(commitTargetResult.kind, commitTargetResult.msg)
+    );
+    return false;
+  }
+  const commitTarget = commitTargetResult.target;
+  if (commitTarget.mode === "trackingWorktree") {
+    output.info(
+      `Using Flight Recorder tracking branch ${commitTarget.branchName} at ${commitTarget.commitRoot}`
+    );
   }
 
   const prepared = await integration.prepareRecording(context, repoRoot);
@@ -583,6 +618,7 @@ export async function startRecording(
     addAll,
     allowEmpty,
     dryRun,
+    commitTarget,
     shownFailureKinds: new Set<GitFailureKind>(),
   };
   if (prepared.ok === true && session) {
@@ -655,7 +691,8 @@ export async function stopRecording(): Promise<boolean> {
         current.logFile,
         current.logSnapshotPrefix,
         current.dryRun,
-        forceAddGeneratedLogs
+        forceAddGeneratedLogs,
+        current.commitTarget
       );
       reportGitActionResult(
         snapshotRes,
@@ -679,7 +716,8 @@ export async function stopRecording(): Promise<boolean> {
       } else {
         const chatExport = await exportCurrentWorkspaceChats(
           extensionContextRef,
-          current.repoRoot
+          current.repoRoot,
+          current.commitTarget.commitRoot
         );
         if (!chatExport.ok) {
           output.error(chatExport.msg);
@@ -694,7 +732,8 @@ export async function stopRecording(): Promise<boolean> {
             current.repoRoot,
             chatExport.destDir,
             current.dryRun,
-            forceAddGeneratedLogs
+            forceAddGeneratedLogs,
+            current.commitTarget
           );
           reportGitActionResult(
             chatCommitRes,

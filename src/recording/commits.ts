@@ -30,6 +30,26 @@ export type GitValidationResult =
   | { ok: true }
   | { ok: false; kind: GitFailureKind; msg: string; err: string };
 
+export type RecordingCommitMode = "currentBranch" | "trackingWorktree";
+
+export type RecordingCommitTarget =
+  | {
+      mode: "currentBranch";
+      sourceRoot: string;
+      commitRoot: string;
+    }
+  | {
+      mode: "trackingWorktree";
+      sourceRoot: string;
+      commitRoot: string;
+      branchName: string;
+      sourceBranchName: string;
+    };
+
+export type RecordingCommitTargetOptions = {
+  mode: RecordingCommitMode;
+  trackingBranchPrefix: string;
+};
 
 /** Returns whether a failed git command result was caused by git not being installed/found. */
 function isGitNotFoundResult(res: GitCommandResult): boolean {
@@ -171,6 +191,181 @@ export async function validateGitRecordingReadiness(
   return { ok: true };
 }
 
+function sanitizeRefSegment(value: string): string {
+  const sanitized = value
+    .trim()
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .replace(/\.+$/g, "")
+    .replace(/\.lock$/i, "");
+
+  return sanitized.length > 0 ? sanitized : "unnamed";
+}
+
+function sanitizeTrackingBranchPrefix(value: string): string {
+  const segments = value
+    .split("/")
+    .map((segment) => sanitizeRefSegment(segment))
+    .filter((segment) => segment.length > 0);
+
+  return segments.length > 0 ? segments.join("/") : "flight-recorder";
+}
+
+function trackingWorktreeDirectoryName(branchName: string): string {
+  return sanitizeRefSegment(branchName.replace(/\//g, "__"));
+}
+
+async function readSourceBranchName(repoRoot: string): Promise<string> {
+  const branch = await gitCmd(["branch", "--show-current"], repoRoot);
+  const currentBranch = branch.out.trim();
+  if (branch.code === 0 && currentBranch.length > 0) {
+    return currentBranch;
+  }
+
+  const shortHead = await gitCmd(["rev-parse", "--short", "HEAD"], repoRoot);
+  if (shortHead.code === 0 && shortHead.out.trim().length > 0) {
+    return `detached-${shortHead.out.trim()}`;
+  }
+
+  return "detached-head";
+}
+
+async function readCommonGitDir(repoRoot: string): Promise<GitCommandResult> {
+  const res = await gitCmd(["rev-parse", "--git-common-dir"], repoRoot);
+  if (res.code !== 0) {
+    return res;
+  }
+
+  const rawPath = res.out.trim();
+  res.out = path.isAbsolute(rawPath)
+    ? rawPath
+    : path.resolve(repoRoot, rawPath);
+  return res;
+}
+
+async function gitBranchExists(
+  repoRoot: string,
+  branchName: string
+): Promise<boolean> {
+  const res = await gitCmd(
+    ["show-ref", "--verify", "--quiet", `refs/heads/${branchName}`],
+    repoRoot
+  );
+  return res.code === 0;
+}
+
+/**
+ * Resolves where Flight Recorder should create commits. In tracking-worktree
+ * mode this creates or reuses a hidden worktree on a dedicated branch under
+ * the repository's common git directory, so user branch/index state is isolated.
+ */
+export async function prepareRecordingCommitTarget(
+  repoRoot: string,
+  dryRun: boolean,
+  options: RecordingCommitTargetOptions
+): Promise<
+  | { ok: true; target: RecordingCommitTarget }
+  | { ok: false; kind: GitFailureKind; msg: string; err: string }
+> {
+  const sourceRoot = path.resolve(repoRoot);
+  if (options.mode === "currentBranch") {
+    return {
+      ok: true,
+      target: {
+        mode: "currentBranch",
+        sourceRoot,
+        commitRoot: sourceRoot,
+      },
+    };
+  }
+
+  const sourceBranchName = await readSourceBranchName(sourceRoot);
+  const prefix = sanitizeTrackingBranchPrefix(options.trackingBranchPrefix);
+  const branchName = `${prefix}/${sanitizeRefSegment(sourceBranchName)}`;
+  const commonGitDir = await readCommonGitDir(sourceRoot);
+  if (commonGitDir.code !== 0) {
+    const failure = classifyGitFailure(
+      "validate",
+      commonGitDir,
+      "Failed to locate the repository git directory."
+    );
+    return { ok: false, ...failure };
+  }
+
+  const commitRoot = path.join(
+    commonGitDir.out.trim(),
+    "flight-recorder-worktrees",
+    trackingWorktreeDirectoryName(branchName)
+  );
+
+  if (dryRun) {
+    return {
+      ok: true,
+      target: {
+        mode: "trackingWorktree",
+        sourceRoot,
+        commitRoot,
+        branchName,
+        sourceBranchName,
+      },
+    };
+  }
+
+  if (!fs.existsSync(commitRoot)) {
+    fs.mkdirSync(path.dirname(commitRoot), { recursive: true });
+    const branchExists = await gitBranchExists(sourceRoot, branchName);
+    const addArgs = branchExists
+      ? ["worktree", "add", commitRoot, branchName]
+      : ["worktree", "add", "-b", branchName, commitRoot, "HEAD"];
+    const addRes = await gitCmd(addArgs, sourceRoot);
+    if (addRes.code !== 0) {
+      const failure = classifyGitFailure(
+        "validate",
+        addRes,
+        `Failed to prepare Flight Recorder tracking worktree at ${commitRoot}.`
+      );
+      return { ok: false, ...failure };
+    }
+  } else {
+    const worktreeCheck = await gitCmd(
+      ["rev-parse", "--is-inside-work-tree"],
+      commitRoot
+    );
+    if (worktreeCheck.code !== 0 || worktreeCheck.out.trim() !== "true") {
+      return {
+        ok: false,
+        kind: "unknown_git_error",
+        msg: `Flight Recorder tracking path exists but is not a git worktree: ${commitRoot}`,
+        err: worktreeCheck.err || worktreeCheck.out,
+      };
+    }
+
+    const currentBranch = await gitCmd(["branch", "--show-current"], commitRoot);
+    if (
+      currentBranch.code !== 0 ||
+      currentBranch.out.trim() !== branchName
+    ) {
+      return {
+        ok: false,
+        kind: "unknown_git_error",
+        msg: `Flight Recorder tracking worktree is not on expected branch ${branchName}.`,
+        err: currentBranch.err || currentBranch.out,
+      };
+    }
+  }
+
+  return {
+    ok: true,
+    target: {
+      mode: "trackingWorktree",
+      sourceRoot,
+      commitRoot,
+      branchName,
+      sourceBranchName,
+    },
+  };
+}
+
 /** Extracts file paths from `git status --porcelain` output, using the new-name side of renames. */
 function parsePorcelainNames(porcelain: string): string[] {
   // status --porcelain lines look like:
@@ -204,6 +399,88 @@ export async function listAllChangedFiles(repoRoot: string): Promise<string[]> {
     return [];
   }
   return parsePorcelainNames(st.out);
+}
+
+function createCurrentBranchTarget(repoRoot: string): RecordingCommitTarget {
+  const resolved = path.resolve(repoRoot);
+  return {
+    mode: "currentBranch",
+    sourceRoot: resolved,
+    commitRoot: resolved,
+  };
+}
+
+function targetOrDefault(
+  repoRoot: string,
+  target?: RecordingCommitTarget
+): RecordingCommitTarget {
+  return target ?? createCurrentBranchTarget(repoRoot);
+}
+
+function normalizeRelativeRepoPath(rel: string): string | null {
+  const normalized = path.normalize(rel);
+  if (
+    path.isAbsolute(normalized) ||
+    normalized === ".." ||
+    normalized.startsWith(`..${path.sep}`)
+  ) {
+    return null;
+  }
+  return normalized;
+}
+
+function copySnapshotIntoCommitTarget(
+  sourceRoot: string,
+  commitRoot: string,
+  rel: string
+): void {
+  const normalizedRel = normalizeRelativeRepoPath(rel);
+  if (!normalizedRel) {
+    return;
+  }
+
+  const sourcePath = path.join(sourceRoot, normalizedRel);
+  const targetPath = path.join(commitRoot, normalizedRel);
+
+  if (!fs.existsSync(sourcePath)) {
+    fs.rmSync(targetPath, { recursive: true, force: true });
+    return;
+  }
+
+  const sourceStat = fs.lstatSync(sourcePath);
+  fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+  fs.rmSync(targetPath, { recursive: true, force: true });
+
+  if (sourceStat.isSymbolicLink()) {
+    const linkTarget = fs.readlinkSync(sourcePath);
+    fs.symlinkSync(linkTarget, targetPath);
+    return;
+  }
+
+  fs.cpSync(sourcePath, targetPath, {
+    recursive: true,
+    errorOnExist: false,
+    force: true,
+  });
+}
+
+async function changedFilesForCommit(
+  sourceRoot: string,
+  relFiles: string[],
+  addAll: boolean
+): Promise<string[]> {
+  if (addAll || relFiles.length === 0) {
+    return listAllChangedFiles(sourceRoot);
+  }
+
+  const changedFiles: string[] = [];
+  for (const rel of relFiles) {
+    const changed = await fileHasChanges(sourceRoot, rel);
+    if (changed) {
+      changedFiles.push(rel);
+    }
+  }
+  return changedFiles;
 }
 
 /** Returns whether a file differs from HEAD in the working tree, or is untracked. */
@@ -243,7 +520,8 @@ async function stageAndCommit(
   relFiles: string[],
   addAll: boolean,
   allowEmpty: boolean,
-  dryRun: boolean
+  dryRun: boolean,
+  target = createCurrentBranchTarget(repoRoot)
 ): Promise<GitActionResult> {
   if (dryRun) {
     let wouldStage: string[] = [];
@@ -291,6 +569,69 @@ async function stageAndCommit(
         `[dry-run] would run: git commit -m "${msg}"${allowEmptyPart}\n` +
         `[dry-run] would include: ${stagedPart}`,
       err: "",
+    };
+  }
+
+  if (target.mode === "trackingWorktree") {
+    const effectiveRelFiles = await changedFilesForCommit(
+      target.sourceRoot,
+      relFiles,
+      addAll
+    );
+
+    for (const rel of effectiveRelFiles) {
+      copySnapshotIntoCommitTarget(
+        target.sourceRoot,
+        target.commitRoot,
+        rel
+      );
+    }
+
+    if (effectiveRelFiles.length > 0) {
+      const addRes = await gitCmd(
+        ["add", "-A", "--", ...effectiveRelFiles],
+        target.commitRoot
+      );
+      if (addRes.code !== 0) {
+        const failure = classifyGitFailure(
+          "add",
+          addRes,
+          `Failed to stage tracking worktree changes for ${effectiveRelFiles.join(", ")}.`
+        );
+        return { ok: false, skipped: false, ...failure };
+      }
+    }
+
+    const diffCached = await gitCmd(
+      ["diff", "--cached", "--name-only"],
+      target.commitRoot
+    );
+    const stagedAny = diffCached.out.trim().length > 0;
+
+    if (!stagedAny && !allowEmpty) {
+      return { ok: false, skipped: true, msg: `No staged changes for ${ts}` };
+    }
+
+    const args = ["commit", "-m", msg];
+    if (allowEmpty && !stagedAny) {
+      args.splice(1, 0, "--allow-empty");
+    }
+
+    const res = await gitCmd(args, target.commitRoot);
+    if (res.code !== 0) {
+      const failure = classifyGitFailure(
+        "commit",
+        res,
+        `Failed to create tracking worktree commit for ${ts}.`
+      );
+      return { ok: false, skipped: false, ...failure };
+    }
+
+    return {
+      ok: true,
+      skipped: false,
+      msg: `${msg}\ntrackingBranch: ${target.branchName}`,
+      err: res.err,
     };
   }
 
@@ -363,8 +704,10 @@ export async function commitTrackedWindow(
   commit: WindowCommit,
   addAll: boolean,
   allowEmpty: boolean,
-  dryRun: boolean
+  dryRun: boolean,
+  target?: RecordingCommitTarget
 ): Promise<GitActionResult> {
+  const commitTarget = targetOrDefault(repoRoot, target);
   const absRepo = path.resolve(repoRoot);
   const relFiles = Array.from(
     new Set(
@@ -377,7 +720,16 @@ export async function commitTrackedWindow(
 
   const msg = formatWindowCommitMessage(commit, repoRoot);
   const ts = new Date(commit.endedAt).toISOString();
-  return stageAndCommit(repoRoot, msg, ts, relFiles, addAll, allowEmpty, dryRun);
+  return stageAndCommit(
+    repoRoot,
+    msg,
+    ts,
+    relFiles,
+    addAll,
+    allowEmpty,
+    dryRun,
+    commitTarget
+  );
 }
 
 /**
@@ -389,14 +741,16 @@ export async function commitAssistantLogSnapshot(
   sourceLogFile: string,
   snapshotPrefix: string,
   dryRun: boolean,
-  forceAdd: boolean
+  forceAdd: boolean,
+  target?: RecordingCommitTarget
 ): Promise<GitActionResult & { snapshotPath?: string }> {
+  const commitTarget = targetOrDefault(repoRoot, target);
   const stamp = (new Date()).toISOString().replace(/:/g, "-").replace(/\./g, "-");
   const relSnapshotPath = path.join(
     LOG_EXPORT_PATH,
     `${snapshotPrefix}-${stamp}.log`
   );
-  const absSnapshotPath = path.join(repoRoot, relSnapshotPath);
+  const absSnapshotPath = path.join(commitTarget.commitRoot, relSnapshotPath);
 
   // In dry-run mode, report what would happen without copying or committing.
   if (dryRun) {
@@ -422,7 +776,7 @@ export async function commitAssistantLogSnapshot(
   const addArgs = forceAdd
     ? ["add", "-f", "--", relSnapshotPath]
     : ["add", "--", relSnapshotPath];
-  const addRes = await gitCmd(addArgs, repoRoot);
+  const addRes = await gitCmd(addArgs, commitTarget.commitRoot);
   if (addRes.code !== 0) {
     const failure = classifyGitFailure(
       "add",
@@ -434,7 +788,7 @@ export async function commitAssistantLogSnapshot(
 
   // Create a dedicated commit for the shutdown snapshot.
   const msg = `recording stopped: ${stamp} | log file: ${relSnapshotPath}`;
-  const commitRes = await gitCmd(["commit", "-m", msg], repoRoot);
+  const commitRes = await gitCmd(["commit", "-m", msg], commitTarget.commitRoot);
   if (commitRes.code !== 0) {
     const failure = classifyGitFailure(
       "commit",
@@ -466,9 +820,11 @@ export async function commitChatExportSnapshot(
   repoRoot: string,
   chatExportDir: string,
   dryRun: boolean,
-  forceAdd: boolean
+  forceAdd: boolean,
+  target?: RecordingCommitTarget
 ): Promise<GitActionResult> {
-  const relChatExportDir = path.relative(repoRoot, chatExportDir);
+  const commitTarget = targetOrDefault(repoRoot, target);
+  const relChatExportDir = path.relative(commitTarget.commitRoot, chatExportDir);
 
   if (dryRun) {
     return {
@@ -484,7 +840,7 @@ export async function commitChatExportSnapshot(
   const addArgs = forceAdd
     ? ["add", "-f", "--", relChatExportDir]
     : ["add", "--", relChatExportDir];
-  const addRes = await gitCmd(addArgs, repoRoot);
+  const addRes = await gitCmd(addArgs, commitTarget.commitRoot);
   if (addRes.code !== 0) {
     const failure = classifyGitFailure(
       "add",
@@ -496,7 +852,7 @@ export async function commitChatExportSnapshot(
 
   const diffCached = await gitCmd(
     ["diff", "--cached", "--name-only", "--", relChatExportDir],
-    repoRoot
+    commitTarget.commitRoot
   );
   if (diffCached.code !== 0) {
     const failure = classifyGitFailure(
@@ -516,7 +872,7 @@ export async function commitChatExportSnapshot(
   }
 
   const msg = `chat export: ${relChatExportDir}`;
-  const commitRes = await gitCmd(["commit", "-m", msg], repoRoot);
+  const commitRes = await gitCmd(["commit", "-m", msg], commitTarget.commitRoot);
   if (commitRes.code !== 0) {
     const failure = classifyGitFailure(
       "commit",

@@ -131,6 +131,24 @@
           "default": false,
           "description": "Do not run git commit; only print what would be committed."
         },
+        "flightRecorder.commitMode": {
+          "type": "string",
+          "enum": [
+            "trackingWorktree",
+            "currentBranch"
+          ],
+          "enumDescriptions": [
+            "Commit Flight Recorder snapshots in a hidden worktree on a dedicated tracking branch.",
+            "Commit Flight Recorder snapshots directly in the currently opened repository checkout."
+          ],
+          "default": "trackingWorktree",
+          "description": "Controls where Flight Recorder creates its tracking commits. The default hidden worktree mode keeps the user's current branch and staging area untouched."
+        },
+        "flightRecorder.trackingBranchPrefix": {
+          "type": "string",
+          "default": "flight-recorder",
+          "description": "Branch prefix used when flightRecorder.commitMode is trackingWorktree. The source branch name is appended after this prefix."
+        },
         "flightRecorder.forceAddGeneratedLogs": {
           "type": "boolean",
           "default": true,
