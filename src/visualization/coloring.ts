@@ -69,25 +69,71 @@ export function rankPalette(
 
 // --- Event-origin palette ---
 
-/** Infers the assistant-event origin kind from the `"origin"` fields embedded in a commit summary/body. */
-export function eventOriginFromSummary(body: string): EventOriginKind {
-  const origins = new Set<string>();
-  const pattern = /"origin"\s*:\s*"([^"]+)"/g;
-  let match: RegExpExecArray | null;
-  while ((match = pattern.exec(body)) !== null) {
-    origins.add(match[1]);
+function normalizeEventOrigin(origin: string): EventOriginKind {
+  switch (origin) {
+    case "assistant-agent-chat":
+    case "assistant-tool-edit":
+    case "agent-edit":
+      return "agent-edit";
+    case "assistant-inline-completion":
+    case "inline-completion":
+      return "inline-completion";
+    case "mixed":
+      return "mixed";
+    default:
+      return "unknown";
   }
-  if (origins.size === 0) {
-    return "unknown";
+}
+
+function eventOriginFromOriginSet(origins: Set<string>): EventOriginKind {
+  const normalizedOrigins = new Set<EventOriginKind>();
+  for (const origin of origins) {
+    const normalized = normalizeEventOrigin(origin);
+    if (normalized !== "unknown") {
+      normalizedOrigins.add(normalized);
+    }
   }
-  if (origins.size > 1) {
+
+  if (normalizedOrigins.has("mixed") || normalizedOrigins.size > 1) {
     return "mixed";
   }
-  const [origin] = [...origins];
-  if (origin === "agent-edit" || origin === "inline-completion") {
-    return origin;
+  if (normalizedOrigins.size === 0) {
+    return "unknown";
   }
-  return "unknown";
+  return [...normalizedOrigins][0];
+}
+
+/** Infers the assistant-event origin kind from the Flight Recorder commit subject or compact JSON summary. */
+export function eventOriginFromSummary(summary: string): EventOriginKind {
+  const lowerSummary = summary.toLowerCase();
+  if (lowerSummary.includes("flight recorder: assistant mixed")) {
+    return "mixed";
+  }
+  if (lowerSummary.includes("flight recorder: assistant inline completion")) {
+    return "inline-completion";
+  }
+  if (
+    lowerSummary.includes("flight recorder: assistant agent chat") ||
+    lowerSummary.includes("flight recorder: assistant tool edit")
+  ) {
+    return "agent-edit";
+  }
+
+  const origins = new Set<string>();
+  const singleOriginPattern = /"origin"\s*:\s*"([^"]+)"/g;
+  let match: RegExpExecArray | null;
+  while ((match = singleOriginPattern.exec(summary)) !== null) {
+    origins.add(match[1]);
+  }
+
+  const originsArrayPattern = /"origins"\s*:\s*\[([^\]]*)\]/g;
+  while ((match = originsArrayPattern.exec(summary)) !== null) {
+    for (const origin of match[1].matchAll(/"([^"]+)"/g)) {
+      origins.add(origin[1]);
+    }
+  }
+
+  return eventOriginFromOriginSet(origins);
 }
 
 /** Returns the human-readable label for an event origin kind. */
