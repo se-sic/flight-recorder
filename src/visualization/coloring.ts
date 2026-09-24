@@ -189,6 +189,7 @@ export function computeFilePalettes(
 }
 
 const globalColorRankCache = new Map<string, Map<string, { rank: number; total: number }>>();
+const commitMessageCache = new Map<string, Map<string, string>>();
 
 /**
  * Fetches (and caches per repo) the repository-wide commit order via `git
@@ -269,17 +270,86 @@ export async function computeGlobalPalettes(
   return { ok: true, paletteByCommit, kindByCommit: null };
 }
 
+async function fetchCommitMessages(
+  repoRoot: string,
+  commitHashes: string[]
+): Promise<
+  | { ok: true; messages: Map<string, string> }
+  | { ok: false; failure: VisualizationGitFailure }
+> {
+  const uniqueHashes = Array.from(
+    new Set(commitHashes.filter((hash) => !/^0{40}$/.test(hash)))
+  ).sort((left, right) => left.localeCompare(right));
+
+  const cached = commitMessageCache.get(repoRoot) ?? new Map<string, string>();
+  const missing = uniqueHashes.filter((hash) => !cached.has(hash));
+  if (missing.length === 0) {
+    commitMessageCache.set(repoRoot, cached);
+    return { ok: true, messages: cached };
+  }
+
+  const fieldSeparator = "\x1f";
+  const recordSeparator = "\x1e";
+  const format = `%H${fieldSeparator}%B${recordSeparator}`;
+  const result = await gitCmd(
+    ["show", `--format=${format}`, "--no-patch", ...missing],
+    repoRoot
+  );
+  if (result.code !== 0) {
+    return {
+      ok: false,
+      failure: classifyVisualizationGitFailure(
+        result,
+        "Failed to inspect commit messages for event-type visualization."
+      ),
+    };
+  }
+
+  for (const record of result.out.split(recordSeparator)) {
+    const trimmedRecord = record.trim();
+    if (trimmedRecord.length === 0) {
+      continue;
+    }
+
+    const separatorIndex = trimmedRecord.indexOf(fieldSeparator);
+    if (separatorIndex < 0) {
+      continue;
+    }
+
+    const commitHash = trimmedRecord.slice(0, separatorIndex).trim();
+    const message = trimmedRecord.slice(separatorIndex + 1).trim();
+    if (commitHash.length > 0) {
+      cached.set(commitHash, message);
+    }
+  }
+
+  commitMessageCache.set(repoRoot, cached);
+  return { ok: true, messages: cached };
+}
+
 /** Computes a per-commit decoration palette for "event type" coloring mode, keyed by inferred event origin. */
-export function computeEventPalettes(
+export async function computeEventPalettes(
+  repoRoot: string,
   commitAgeEntries: ReturnType<typeof buildCommitAgeEntriesFromRanges>,
   isDark: boolean,
   palette: QualitativePalette
-): PaletteResult {
+): Promise<PaletteResult> {
+  const messagesResult = await fetchCommitMessages(
+    repoRoot,
+    commitAgeEntries.map((entry) => entry.commitHash)
+  );
+  if (!messagesResult.ok) {
+    return { ok: false, failure: messagesResult.failure };
+  }
+
   const kindByCommit = new Map(
-    commitAgeEntries.map((entry) => [
-      entry.commitHash,
-      eventOriginFromSummary(entry.summary),
-    ])
+    commitAgeEntries.map((entry) => {
+      const fullMessage = messagesResult.messages.get(entry.commitHash);
+      return [
+        entry.commitHash,
+        eventOriginFromSummary(fullMessage ?? entry.summary),
+      ];
+    })
   );
   const paletteByCommit = new Map(
     commitAgeEntries.map((entry) => [
