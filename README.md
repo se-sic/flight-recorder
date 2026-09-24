@@ -2,8 +2,6 @@
 
 Flight Recorder monitors coding-assistant events, combines them with fine-grained VS Code workspace edit events, commits them to a repository, exports Copilot chat logs, and provides functionality to anonymize and analyze the collected data.
 
-The recorder core now uses assistant-agnostic event interfaces. The currently implemented assistant integration is GitHub Copilot, but the event model and recorder pipeline are designed so future integrations such as Claude Code or Gemini can emit the same normalized event types. The event contract is documented in [docs/assistant-event-model.md](/Users/ben/Productivity/UDS/Hiwi Job/FlightRecorder/flight-recorder/docs/assistant-event-model.md:1).
-
 ## UI Usage
 
 - A permanent status bar button is shown at the bottom of VS Code for recording control.
