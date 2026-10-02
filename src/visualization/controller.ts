@@ -425,7 +425,7 @@ async function applyVisualizationToEditor(
     coloringMode === "file"
       ? computeFilePalettes(commitAgeEntries, isDark, seqPalette)
       : coloringMode === "event"
-      ? computeEventPalettes(commitAgeEntries, isDark, qualPalette)
+      ? await computeEventPalettes(repoRoot, commitAgeEntries, isDark, qualPalette)
       : await computeGlobalPalettes(repoRoot, commitAgeEntries, isDark, seqPalette);
   if (isStale()) { return; }
 
