@@ -5,7 +5,7 @@ import {
   WindowCommit,
 } from "./staging-tracker";
 import { gitCmd, GitCommandResult } from "../utils/git";
-import { LOG_EXPORT_PATH } from "../utils/paths";
+import { LOG_EXPORT_PATH } from "../utils/constants";
 
 export type GitFailureKind =
   | "git_not_found"
@@ -259,8 +259,6 @@ async function stageAndCommit(
         }
       }
       wouldStage = changedFiles;
-    } else {
-      wouldStage = await listAllChangedFiles(repoRoot);
     }
 
     const wouldCommit = wouldStage.length > 0 || allowEmpty;
@@ -280,7 +278,7 @@ async function stageAndCommit(
       ? "git add -A"
       : relFiles.length > 0
         ? `git add -- ${relFiles.join(" ")}`
-        : "git add -A";
+        : "no git add";
     const allowEmptyPart = allowEmpty ? " --allow-empty" : "";
 
     return {
@@ -295,6 +293,10 @@ async function stageAndCommit(
   }
 
   // === Real mode (staging + commit) ===
+  //
+  // For path-specific Flight Recorder commits, use `git commit --only -- <paths>`
+  // after staging the target paths. A plain `git commit` would also include
+  // unrelated changes that were already staged before recording started.
   if (addAll) {
     const addRes = await gitCmd(["add", "-A"], repoRoot);
     if (addRes.code !== 0) {
@@ -306,7 +308,11 @@ async function stageAndCommit(
       return { ok: false, skipped: false, ...failure };
     }
   } else {
-    if (relFiles.length > 0) {
+    if (relFiles.length === 0) {
+      if (!allowEmpty) {
+        return { ok: false, skipped: true, msg: `No tracked files for ${ts}` };
+      }
+    } else {
       const addRes = await gitCmd(["add", "--", ...relFiles], repoRoot);
       if (addRes.code !== 0) {
         const failure = classifyGitFailure(
@@ -316,24 +322,17 @@ async function stageAndCommit(
         );
         return { ok: false, skipped: false, ...failure };
       }
-    } else {
-      const addRes = await gitCmd(["add", "-A"], repoRoot);
-      if (addRes.code !== 0) {
-        const failure = classifyGitFailure(
-          "add",
-          addRes,
-          "Failed to stage repository changes."
-        );
-        return { ok: false, skipped: false, ...failure };
-      }
     }
   }
 
-  const diffCached = await gitCmd(
-    ["diff", "--cached", "--name-only"],
-    repoRoot
-  );
-  const stagedAny = diffCached.out.trim().length > 0;
+  let stagedAny = false;
+  if (addAll || relFiles.length > 0) {
+    const diffArgs = addAll
+      ? ["diff", "--cached", "--name-only"]
+      : ["diff", "--cached", "--name-only", "--", ...relFiles];
+    const diffCached = await gitCmd(diffArgs, repoRoot);
+    stagedAny = diffCached.out.trim().length > 0;
+  }
 
   if (!stagedAny && !allowEmpty) {
     return { ok: false, skipped: true, msg: `No staged changes for ${ts}` };
@@ -342,6 +341,12 @@ async function stageAndCommit(
   const args = ["commit", "-m", msg];
   if (allowEmpty && !stagedAny) {
     args.splice(1, 0, "--allow-empty");
+  }
+  if (!addAll) {
+    args.push("--only");
+    if (relFiles.length > 0) {
+      args.push("--", ...relFiles);
+    }
   }
 
   const res = await gitCmd(args, repoRoot);
@@ -434,7 +439,10 @@ export async function commitAssistantLogSnapshot(
 
   // Create a dedicated commit for the shutdown snapshot.
   const msg = `recording stopped: ${stamp} | log file: ${relSnapshotPath}`;
-  const commitRes = await gitCmd(["commit", "-m", msg], repoRoot);
+  const commitRes = await gitCmd(
+    ["commit", "-m", msg, "--only", "--", relSnapshotPath],
+    repoRoot
+  );
   if (commitRes.code !== 0) {
     const failure = classifyGitFailure(
       "commit",
@@ -516,7 +524,10 @@ export async function commitChatExportSnapshot(
   }
 
   const msg = `chat export: ${relChatExportDir}`;
-  const commitRes = await gitCmd(["commit", "-m", msg], repoRoot);
+  const commitRes = await gitCmd(
+    ["commit", "-m", msg, "--only", "--", relChatExportDir],
+    repoRoot
+  );
   if (commitRes.code !== 0) {
     const failure = classifyGitFailure(
       "commit",
