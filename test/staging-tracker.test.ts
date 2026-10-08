@@ -288,10 +288,11 @@ test("flushAll emits active assistant and concurrent human windows during shutdo
   assert.deepEqual(commits[1].files, ["/tmp/assistant-follow-up.ts"]);
 });
 
-test("assistant commit messages include window metadata and per-event payloads", () => {
+test("assistant commit messages include compact window metadata", () => {
   const tracker = new FineGrainedStagingTracker(0);
   tracker.recordAssistantEvent(
     makeAssistantEvent({
+      origin: "assistant-tool-edit",
       requestId: "req-123",
       cursorPosition: {
         line: 5,
@@ -307,11 +308,14 @@ test("assistant commit messages include window metadata and per-event payloads",
   assert.ok(commit);
 
   const message = formatWindowCommitMessage(commit);
-  assert.match(message, /Flight Recorder: assistant edits/);
+  const lines = message.split("\n");
+  assert.equal(lines.length, 2);
+  assert.equal(lines[0], "Flight Recorder: assistant tool edit (1 file)");
   assert.match(message, /"eventCount":1/);
-  assert.match(message, /"origins":\["assistant-unknown"\]/);
+  assert.match(message, /"origins":\["assistant-tool-edit"\]/);
   assert.match(message, /"fileAttributions":/);
-  assert.match(message, /"requestId":"req-123"/);
+  assert.doesNotMatch(message, /"requestId":"req-123"/);
+  assert.doesNotMatch(message, /"cursorPosition"/);
 });
 
 test("assistant commit messages summarize explicit origins", () => {
@@ -343,8 +347,25 @@ test("assistant commit messages summarize explicit origins", () => {
   assert.ok(commit);
 
   const message = formatWindowCommitMessage(commit);
+  assert.match(message, /^Flight Recorder: assistant mixed \(2 files\)/);
   assert.match(
     message,
     /"origins":\["assistant-agent-chat","assistant-inline-completion","mixed"\]/
   );
+});
+
+test("human commit messages include file count and one metadata payload", () => {
+  const tracker = new FineGrainedStagingTracker(0);
+
+  tracker.recordHumanChange(["/tmp/human.ts", "/tmp/other.ts"], 1_000);
+
+  const commit = tracker.flushAll(1_500)[0];
+  assert.ok(commit);
+  assert.equal(commit.kind, "human");
+
+  const message = formatWindowCommitMessage(commit);
+  const lines = message.split("\n");
+  assert.equal(lines.length, 2);
+  assert.equal(lines[0], "Flight Recorder: human edits (2 files)");
+  assert.match(lines[1], /"kind":"human"/);
 });

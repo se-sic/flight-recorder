@@ -5,7 +5,6 @@ import {
   AttributionEvidence,
   collectEventFilePaths,
   EditOrigin,
-  formatAssistantEventJson,
 } from "./event";
 import { EXTENSION_NAME } from "../utils/constants";
 
@@ -614,17 +613,60 @@ function formatIsoTimestamp(at: number): string {
   return new Date(at).toISOString();
 }
 
+function formatCommitPath(filePath: string, repoRoot?: string): string {
+  const absolute = path.resolve(filePath);
+  if (!repoRoot) {
+    return absolute;
+  }
+
+  const absRepo = path.resolve(repoRoot);
+  return absolute === absRepo || absolute.startsWith(absRepo + path.sep)
+    ? path.relative(repoRoot, absolute).split(path.sep).join("/")
+    : absolute;
+}
+
+function formatCommitPaths(files: string[], repoRoot?: string): string[] {
+  return files
+    .map((filePath) => formatCommitPath(filePath, repoRoot))
+    .sort((left, right) => left.localeCompare(right));
+}
+
+function fileCountLabel(count: number): string {
+  return `${count} ${count === 1 ? "file" : "files"}`;
+}
+
+function assistantOriginLabel(origins: EditOrigin[]): string {
+  if (origins.includes("mixed")) {
+    return "mixed";
+  }
+
+  const [origin] = origins;
+  switch (origin) {
+    case "assistant-inline-completion":
+      return "inline completion";
+    case "assistant-agent-chat":
+      return "agent chat";
+    case "assistant-tool-edit":
+      return "tool edit";
+    case "assistant-unknown":
+    default:
+      return "edits";
+  }
+}
+
 /** Builds the git commit message for a human or assistant window commit. */
 export function formatWindowCommitMessage(
   commit: WindowCommit,
   repoRoot?: string
 ): string {
+  const files = formatCommitPaths(commit.files, repoRoot);
+
   if (commit.kind === "human") {
     return [
-      `${EXTENSION_NAME}: human edits`,
+      `${EXTENSION_NAME}: human edits (${fileCountLabel(files.length)})`,
       JSON.stringify({
         kind: commit.kind,
-        files: commit.files,
+        files,
         startedAt: formatIsoTimestamp(commit.startedAt),
         endedAt: formatIsoTimestamp(commit.endedAt),
       }),
@@ -632,16 +674,20 @@ export function formatWindowCommitMessage(
   }
 
   return [
-    `${EXTENSION_NAME}: assistant edits`,
+    `${EXTENSION_NAME}: assistant ${assistantOriginLabel(commit.origins)} (${fileCountLabel(files.length)})`,
     JSON.stringify({
       kind: commit.kind,
-      files: commit.files,
+      files,
       startedAt: formatIsoTimestamp(commit.startedAt),
       endedAt: formatIsoTimestamp(commit.endedAt),
       eventCount: commit.events.length,
       origins: commit.origins,
-      fileAttributions: commit.fileAttributions,
+      fileAttributions: commit.fileAttributions.map((attribution) => ({
+        path: formatCommitPath(attribution.path, repoRoot),
+        origin: attribution.origin,
+        confidence: attribution.confidence,
+        matched: attribution.matched,
+      })),
     }),
-    ...commit.events.map((event) => formatAssistantEventJson(event, repoRoot)),
   ].join("\n");
 }
