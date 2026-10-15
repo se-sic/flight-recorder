@@ -80,7 +80,9 @@ At the human-to-assistant boundary, Flight Recorder also prefers assistant owner
 
 ## Chat Export
 
-- `Flight Recorder: Export All Chats` exports the current workspace's `chatSessions` files into the opened repository under `.chat-log/<workspaceStorageId>/chatSessions`.
+- `Flight Recorder: Export All Chats` exports the current workspace's chat sessions into the opened repository, named by start time (local) and title:
+  - Copilot Chat sessions (VS Code's `chatSessions` storage) → `.chat-log/copilot-chat/<YYYY-MM-DD_HHMM>_<title>.jsonl`
+  - Copilot CLI agent sessions (`~/.copilot/session-state/<id>`) whose `cwd` or `git_root` is the repository → `.chat-log/copilot-cli/<YYYY-MM-DD_HHMM>_<title>/` (`events.jsonl`, `workspace.yaml`)
 - Exported files are copied as-is; absolute path replacement happens later during `Flight Recorder: Anonymize Repository`.
 - If `flightRecorder.exportChatsOnStop` is enabled, the same export is also performed automatically when recording stops and then committed in a dedicated git commit.
 

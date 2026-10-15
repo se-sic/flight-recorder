@@ -1,5 +1,9 @@
 import * as vscode from "vscode";
 import { CopilotChatSessionWatcher } from "./chat-session";
+import {
+  CopilotCliSessionWatcher,
+  getCopilotCliSessionStateDir,
+} from "./cli-sessions";
 import { CopilotLogParser } from "./parser";
 import {
   AssistantIntegration,
@@ -122,7 +126,7 @@ export class CopilotIntegration implements AssistantIntegration {
   /** Locates the Copilot log file and enables debug logging for it, returning it ready to tail or a failure if either step fails. */
   async prepareRecording(
     context: vscode.ExtensionContext,
-    _repoRoot: string
+    repoRoot: string
   ): Promise<AssistantIntegrationReady> {
     const windowLogDir = getWindowLogDirFromContext(context);
     if (!windowLogDir) {
@@ -145,6 +149,10 @@ export class CopilotIntegration implements AssistantIntegration {
       return logSetup;
     }
 
+    getLogChannel().info(
+      `Watching Copilot CLI sessions for ${repoRoot} in ${getCopilotCliSessionStateDir()}`
+    );
+
     return {
       ok: true,
       assistantId: this.assistantId,
@@ -152,7 +160,10 @@ export class CopilotIntegration implements AssistantIntegration {
       logFile,
       logSnapshotPrefix: this.logSnapshotPrefix,
       parser: new CopilotLogParser(),
-      runtimeEventSources: [new CopilotChatSessionWatcher(context)],
+      runtimeEventSources: [
+        new CopilotChatSessionWatcher(context),
+        new CopilotCliSessionWatcher(repoRoot),
+      ],
     };
   }
 
