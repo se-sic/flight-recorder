@@ -9,7 +9,7 @@ import {
   commitTrackedWindow,
 } from "../src/recording/commits";
 import { gitCmd } from "../src/utils/git";
-import type { WindowCommit } from "../src/recording/staging-tracker";
+import type { HumanWindowCommit } from "../src/recording/staging-tracker";
 
 async function createRepo(): Promise<string> {
   const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "fr-commits-"));
@@ -22,7 +22,7 @@ async function createRepo(): Promise<string> {
   return repoRoot;
 }
 
-function humanCommit(repoRoot: string, files: string[]): WindowCommit {
+function humanCommit(repoRoot: string, files: string[]): HumanWindowCommit {
   return {
     kind: "human",
     files: files.map((file) => path.join(repoRoot, file)),
@@ -56,6 +56,36 @@ test("commitTrackedWindow leaves unrelated pre-staged files out of path-specific
 
   const staged = await gitCmd(["diff", "--cached", "--name-status"], repoRoot);
   assert.equal(staged.out.trim(), "A\tpreexisting.txt");
+});
+
+test("commitTrackedWindow commits human snapshots instead of the working tree", async () => {
+  const repoRoot = await createRepo();
+
+  fs.writeFileSync(path.join(repoRoot, "preexisting.txt"), "preexisting\n", "utf8");
+  await gitCmd(["add", "preexisting.txt"], repoRoot);
+  // The working tree already contains the assistant's edit on top.
+  fs.writeFileSync(path.join(repoRoot, "tracked.txt"), "base\nhuman\nai\n", "utf8");
+
+  const result = await commitTrackedWindow(
+    repoRoot,
+    {
+      ...humanCommit(repoRoot, ["tracked.txt"]),
+      snapshots: { [path.resolve(repoRoot, "tracked.txt")]: "base\nhuman\n" },
+    },
+    false,
+    false,
+    false
+  );
+  assert.equal(result.ok, true);
+
+  const committed = await gitCmd(["show", "HEAD:tracked.txt"], repoRoot);
+  assert.equal(committed.out.replace(/\r\n/g, "\n"), "base\nhuman\n");
+
+  const status = await gitCmd(["status", "--porcelain"], repoRoot);
+  assert.deepEqual(
+    status.out.split(/\r?\n/).filter(Boolean).sort(),
+    [" M tracked.txt", "A  preexisting.txt"]
+  );
 });
 
 test("commitTrackedWindow with no files does not fall back to staging the whole repo", async () => {

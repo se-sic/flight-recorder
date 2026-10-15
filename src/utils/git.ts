@@ -10,10 +10,15 @@ export type GitCommandResult = {
 /** Runs `git` with the given arguments in `cwd` and collects its exit code, stdout, and stderr. */
 export function gitCmd(
   args: string[],
-  cwd: string
+  cwd: string,
+  options: { input?: string; env?: Record<string, string> } = {}
 ): Promise<GitCommandResult> {
   return new Promise((resolve) => {
-    const p = spawn("git", args, { cwd });
+    const env = options.env ? { ...process.env, ...options.env } : undefined;
+    const p = spawn("git", args, { cwd, env });
+    if (options.input !== undefined) {
+      p.stdin.end(options.input);
+    }
     let out = "";
     let err = "";
     let spawnError: Error | undefined;

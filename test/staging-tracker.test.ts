@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import * as path from "node:path";
 import test from "node:test";
 import {
   FineGrainedStagingTracker,
@@ -6,6 +7,11 @@ import {
   hashInsertedText,
 } from "../src/recording/staging-tracker";
 import type { AssistantEvent } from "../src/recording/event";
+
+/** The tracker resolves paths, so on Windows "/tmp/x" becomes "C:\tmp\x". */
+function resolved(...files: string[]): string[] {
+  return files.map((file) => path.resolve(file));
+}
 
 function makeAssistantEvent(
   overrides: Partial<AssistantEvent> = {}
@@ -50,7 +56,7 @@ test("flushes human window when the first assistant event arrives", () => {
   assert.equal(commits.length, 1);
   assert.deepEqual(commits[0], {
     kind: "human",
-    files: ["/tmp/human-2.ts", "/tmp/human.ts"].sort(),
+    files: resolved("/tmp/human-2.ts", "/tmp/human.ts").sort(),
     startedAt: 1_000,
     endedAt: 1_500,
   });
@@ -77,7 +83,7 @@ test("keeps same-file changes inside the assistant debounce window", () => {
   const commit = tracker.flushAssistantWindowIfIdle(11_201);
   assert.ok(commit);
   assert.equal(commit.kind, "assistant");
-  assert.deepEqual(commit.files, ["/tmp/assistant.ts"]);
+  assert.deepEqual(commit.files, resolved("/tmp/assistant.ts"));
   assert.equal(commit.startedAt, 10_000);
   assert.equal(commit.endedAt, 10_200);
 });
@@ -142,7 +148,7 @@ test("records high-confidence materialization when observed text matches assista
   assert.equal(commit.kind, "assistant");
   assert.deepEqual(commit.fileAttributions, [
     {
-      path: "/tmp/assistant.ts",
+      path: path.resolve("/tmp/assistant.ts"),
       origin: "assistant-agent-chat",
       confidence: "high",
       matched: true,
@@ -175,12 +181,12 @@ test("keeps unrelated file changes human-owned during assistant windows", () => 
   const assistantCommit = tracker.flushAssistantWindowIfIdle(11_001);
   assert.ok(assistantCommit);
   assert.equal(assistantCommit.kind, "assistant");
-  assert.deepEqual(assistantCommit.files, ["/tmp/assistant.ts"]);
+  assert.deepEqual(assistantCommit.files, resolved("/tmp/assistant.ts"));
 
   const pendingCommits = tracker.flushAll(12_000);
   assert.equal(pendingCommits.length, 1);
   assert.equal(pendingCommits[0].kind, "human");
-  assert.deepEqual(pendingCommits[0].files, ["/tmp/human-during-assistant.ts"]);
+  assert.deepEqual(pendingCommits[0].files, resolved("/tmp/human-during-assistant.ts"));
 });
 
 test("assistant boundary drops overlapping files from the flushed human window", () => {
@@ -206,14 +212,44 @@ test("assistant boundary drops overlapping files from the flushed human window",
 
   assert.equal(commits.length, 1);
   assert.equal(commits[0].kind, "human");
-  assert.deepEqual(commits[0].files, ["/tmp/human-only.ts"]);
+  assert.deepEqual(commits[0].files, resolved("/tmp/human-only.ts"));
 
   const assistantCommit = tracker.flushAll(4_000)[0];
   assert.equal(assistantCommit.kind, "assistant");
-  assert.deepEqual(assistantCommit.files, [
-    "/tmp/assistant-only.ts",
-    "/tmp/shared.ts",
-  ]);
+  assert.deepEqual(
+    assistantCommit.files,
+    resolved("/tmp/assistant-only.ts", "/tmp/shared.ts")
+  );
+});
+
+test("assistant boundary keeps earlier human text of a shared file", () => {
+  const tracker = new FineGrainedStagingTracker(1_000);
+  const shared = path.resolve("/tmp/shared.ts");
+  const change = (text: string) => ({
+    path: shared,
+    insertedTextHashes: [],
+    insertedTextLength: 1,
+    ranges: [],
+    text,
+  });
+
+  tracker.recordTextDocumentChange([change("h1")], 1_000);
+  tracker.recordTextDocumentChange([change("h2")], 5_000);
+  // The assistant's edit reaches the editor just before its event is parsed.
+  tracker.recordTextDocumentChange([change("h2+ai")], 9_700);
+
+  const commits = tracker.recordAssistantEvent(
+    makeAssistantEvent({ fileOperations: [{ kind: "update", path: shared }] }),
+    10_000
+  );
+
+  assert.equal(commits.length, 1);
+  assert.equal(commits[0].kind, "human");
+  assert.deepEqual(commits[0].files, [shared]);
+  assert.deepEqual(
+    commits[0].kind === "human" ? commits[0].snapshots : undefined,
+    { [shared]: "h2" }
+  );
 });
 
 test("assistant tool events with file paths keep later workspace edits out of the human commit", () => {
@@ -240,7 +276,7 @@ test("assistant tool events with file paths keep later workspace edits out of th
   tracker.recordHumanChange(["/tmp/shared.ts"], 1_200);
   const assistantCommit = tracker.flushAll(3_000)[0];
   assert.equal(assistantCommit.kind, "assistant");
-  assert.deepEqual(assistantCommit.files, ["/tmp/shared.ts"]);
+  assert.deepEqual(assistantCommit.files, resolved("/tmp/shared.ts"));
 });
 
 test("deferred assistant boundaries do not flush before the file change lands", () => {
@@ -266,7 +302,7 @@ test("deferred assistant boundaries do not flush before the file change lands", 
   const commit = tracker.flushAssistantWindowIfIdle(6_200);
   assert.ok(commit);
   assert.equal(commit.kind, "assistant");
-  assert.deepEqual(commit.files, ["/tmp/existing.ts"]);
+  assert.deepEqual(commit.files, resolved("/tmp/existing.ts"));
 });
 
 test("flushAll emits active assistant and concurrent human windows during shutdown", () => {
@@ -283,9 +319,9 @@ test("flushAll emits active assistant and concurrent human windows during shutdo
 
   assert.equal(commits.length, 2);
   assert.equal(commits[0].kind, "assistant");
-  assert.deepEqual(commits[0].files, ["/tmp/demo.ts"]);
+  assert.deepEqual(commits[0].files, resolved("/tmp/demo.ts"));
   assert.equal(commits[1].kind, "human");
-  assert.deepEqual(commits[1].files, ["/tmp/assistant-follow-up.ts"]);
+  assert.deepEqual(commits[1].files, resolved("/tmp/assistant-follow-up.ts"));
 });
 
 test("assistant commit messages include compact window metadata", () => {

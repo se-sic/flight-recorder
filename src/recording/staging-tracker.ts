@@ -13,6 +13,8 @@ export type HumanWindowCommit = {
   files: string[];
   startedAt: number;
   endedAt: number;
+  /** Content to commit instead of the working-tree file, by absolute path. */
+  snapshots?: Record<string, string>;
 };
 
 export type AssistantWindowCommit = {
@@ -39,7 +41,17 @@ export type WorkspaceTextChange = {
   insertedTextHashes: string[];
   insertedTextLength: number;
   ranges: TextChangeRange[];
+  /** Full document text after the change. */
+  text?: string;
 };
+
+type TextSnapshot = { at: number; text: string };
+
+/**
+ * How long an assistant edit may sit in the editor before its event is
+ * parsed. Human text older than this is safe to attribute to the human.
+ */
+const ASSISTANT_EVENT_LAG_MS = 1_000;
 
 export type FileAttribution = {
   path: string;
@@ -59,6 +71,8 @@ type HumanWindowState = {
   files: Set<string>;
   startedAt: number | null;
   endedAt: number | null;
+  /** Recent document texts per file, oldest first. */
+  texts: Map<string, TextSnapshot[]>;
 };
 
 type AssistantWindowState = {
@@ -370,6 +384,7 @@ export class FineGrainedStagingTracker {
     files: new Set<string>(),
     startedAt: null,
     endedAt: null,
+    texts: new Map<string, TextSnapshot[]>(),
   };
 
   private assistantState: AssistantWindowState | null = null;
@@ -390,6 +405,11 @@ export class FineGrainedStagingTracker {
     const normalized = normalizePaths(paths);
     if (normalized.length === 0) {
       return;
+    }
+
+    // Create/delete/rename leave no editor text, so earlier snapshots are stale.
+    for (const filePath of normalized) {
+      this.humanState.texts.delete(filePath);
     }
 
     if (this.assistantState) {
@@ -437,12 +457,13 @@ export class FineGrainedStagingTracker {
         normalizedChanges.map((change) => change.path),
         at
       );
+      this.recordHumanTexts(normalizedChanges, at);
       return;
     }
 
     const knownAssistantFiles = this.assistantState.files;
     const hasConcreteAssistantFiles = knownAssistantFiles.size > 0;
-    const humanPaths: string[] = [];
+    const humanChanges: WorkspaceTextChange[] = [];
 
     for (const change of normalizedChanges) {
       if (!hasConcreteAssistantFiles || knownAssistantFiles.has(change.path)) {
@@ -451,12 +472,34 @@ export class FineGrainedStagingTracker {
         this.assistantState.awaitingMaterialization = false;
         this.recordAssistantMaterialization(change);
       } else {
-        humanPaths.push(change.path);
+        humanChanges.push(change);
       }
     }
 
-    if (humanPaths.length > 0) {
-      this.recordHumanChangeWithoutAssistant(humanPaths, at);
+    if (humanChanges.length > 0) {
+      this.recordHumanChangeWithoutAssistant(
+        humanChanges.map((change) => change.path),
+        at
+      );
+      this.recordHumanTexts(humanChanges, at);
+    }
+  }
+
+  /**
+   * Remembers each file's text after a human change. Only the newest text
+   * older than ASSISTANT_EVENT_LAG_MS is needed, so older ones are dropped.
+   */
+  private recordHumanTexts(changes: WorkspaceTextChange[], at: number): void {
+    for (const change of changes) {
+      if (change.text === undefined) {
+        this.humanState.texts.delete(change.path);
+        continue;
+      }
+      const texts = this.humanState.texts.get(change.path) ?? [];
+      texts.push({ at, text: change.text });
+      const settled = texts.filter((t) => t.at <= at - ASSISTANT_EVENT_LAG_MS);
+      const keepFrom = settled.length > 0 ? texts.indexOf(settled[settled.length - 1]) : 0;
+      this.humanState.texts.set(change.path, texts.slice(keepFrom));
     }
   }
 
@@ -499,8 +542,10 @@ export class FineGrainedStagingTracker {
 
   /**
    * Records an assistant event, opening an assistant window if none is active.
-   * Any open human window is flushed first, except overlapping files are moved
-   * into assistant ownership to account for event-order races.
+   * Any open human window is flushed first. The assistant's edit is usually
+   * already in the editor when its event arrives, so for files both touched,
+   * the human commit uses the file's text from before that lag; without such
+   * text the file moves into assistant ownership.
    */
   recordAssistantEvent(
     event: AssistantEvent,
@@ -508,13 +553,24 @@ export class FineGrainedStagingTracker {
   ): WindowCommit[] {
     const commits: WindowCommit[] = [];
     const assistantPaths = normalizePaths(collectEventFilePaths(event));
+    const snapshots: Record<string, string> = {};
 
     for (const filePath of assistantPaths) {
-      this.humanState.files.delete(filePath);
+      const settled = (this.humanState.texts.get(filePath) ?? []).filter(
+        (t) => t.at <= at - ASSISTANT_EVENT_LAG_MS
+      );
+      if (this.humanState.files.has(filePath) && settled.length > 0) {
+        snapshots[filePath] = settled[settled.length - 1].text;
+      } else {
+        this.humanState.files.delete(filePath);
+      }
     }
 
     const humanCommit = finalizeHumanWindow(this.humanState);
     if (humanCommit) {
+      if (Object.keys(snapshots).length > 0) {
+        humanCommit.snapshots = snapshots;
+      }
       commits.push(humanCommit);
     }
     this.humanState = {
@@ -522,6 +578,7 @@ export class FineGrainedStagingTracker {
       files: new Set<string>(),
       startedAt: null,
       endedAt: null,
+      texts: new Map<string, TextSnapshot[]>(),
     };
 
     if (!this.assistantState) {
@@ -602,6 +659,7 @@ export class FineGrainedStagingTracker {
       files: new Set<string>(),
       startedAt: null,
       endedAt: null,
+      texts: new Map<string, TextSnapshot[]>(),
     };
 
     return commits;

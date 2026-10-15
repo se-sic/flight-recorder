@@ -240,6 +240,7 @@ function registerWorkspaceChangeTracking(
           endLine: change.range.end.line,
           endColumn: change.range.end.character,
         })),
+        text: event.document.getText(),
       };
 
       session.tracker.recordTextDocumentChange([textChange]);
