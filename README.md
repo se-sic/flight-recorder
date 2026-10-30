@@ -52,7 +52,7 @@ Flight Recorder resolves one active assistant integration at startup through `fl
 - Current built-in integrations: `github-copilot`, `claude-code`
 - Set `activeIntegration` to `askOnStartup` to be prompted for a choice each time you start recording instead of always using a fixed integration
 - The selected integration controls recording setup, primary log discovery, event parsing, and assistant-log snapshot naming.
-- The recorder core remains integration-agnostic; adding another assistant should mainly require registering another implementation of the integration contract documented in [docs/assistant-event-model.md](/Users/ben/Productivity/UDS/Hiwi Job/FlightRecorder/flight-recorder/docs/assistant-event-model.md:1).
+- The recorder core remains integration-agnostic; adding another assistant should mainly require registering another implementation of the integration contract defined in `src/recording/integration.ts`, which emits the shared event model from `src/recording/event.ts`.
 
 ### Claude Code (Experimental)
 
@@ -110,9 +110,9 @@ If finalization could not complete, for example because the final branch is chec
 
 All settings use the `flightRecorder.*` prefix:
 
-- `debounceMs` (default `0`): assistant-window debounce in milliseconds. Human edits are staged continuously; after an assistant event is detected, Flight Recorder keeps attributing subsequent tracked changes to the assistant until this idle timeout expires.
+- `debounceMs` (default `1000`): assistant-window debounce in milliseconds. Human edits are staged continuously; after an assistant event is detected, Flight Recorder keeps attributing subsequent tracked changes to the assistant until this idle timeout expires.
 - `activeIntegration` (default `github-copilot`): selects which assistant integration Flight Recorder uses for recording and primary log discovery.
-- `claudeSource` (default `auto`): for the Claude Code integration, choose whether Flight Recorder uses the hook log, the local transcript store, or auto-detects between them.
+- `claudeSource` (default `hookLog`): for the Claude Code integration, choose whether Flight Recorder uses the hook log, the local transcript store, or auto-detects between them.
 - `claudeHookLogPath` (default `.claude/flight-recorder-hooks.jsonl`): for the Claude Code integration, path to the JSONL hook log file. Relative paths are resolved against the repository root.
 - `claudeConfigDir` (default empty): optional override for the Claude Code configuration directory. When empty, Flight Recorder uses `CLAUDE_CONFIG_DIR` if set, otherwise `~/.claude`.
 - `claudeMissingSourceBehavior` (default `wait`): for the Claude Code integration, choose whether Flight Recorder should wait for the first repo-specific hook log/transcript to appear or fail startup immediately when no source exists yet.

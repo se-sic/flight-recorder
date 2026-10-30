@@ -5,7 +5,7 @@ import {
   WindowCommit,
 } from "./staging-tracker";
 import { gitCmd, GitCommandResult } from "../utils/git";
-import { LOG_EXPORT_PATH } from "../utils/paths";
+import { LOG_EXPORT_PATH } from "../utils/constants";
 
 export type GitFailureKind =
   | "git_not_found"

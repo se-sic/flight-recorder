@@ -70,9 +70,18 @@ function classifySubject(subject: string): RecordingHistoryEntry["kind"] {
   return "unknown";
 }
 
+/**
+ * Parses one `git log` record. The subject is taken from the raw message's
+ * first line rather than `%s`, because recorder commits put their JSON
+ * metadata on the line right after the subject without a blank line, which
+ * `%s` would fold into the subject.
+ */
 function parseHistoryEntry(record: string): RecordingHistoryEntry | null {
-  const [hash, shortHash, authorDate, author, subject, body = ""] =
+  const [hash, shortHash, authorDate, author, rawMessage = ""] =
     record.split("\x1f");
+  const [firstLine = "", ...bodyLines] = rawMessage.split("\n");
+  const subject = firstLine.trim();
+  const body = bodyLines.join("\n");
   if (!hash || !shortHash || !subject) {
     return null;
   }
@@ -155,7 +164,7 @@ export async function readRecordingHistory(
       "log",
       `--max-count=${limit}`,
       "--date=iso-strict",
-      "--format=%H%x1f%h%x1f%aI%x1f%an%x1f%s%x1f%b%x1e",
+      "--format=%H%x1f%h%x1f%aI%x1f%an%x1f%B%x1e",
       branchName,
       "--",
     ],

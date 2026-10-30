@@ -1,6 +1,6 @@
 import * as path from "path";
 import { pathToFileURL } from "url";
-import { CHAT_EXPORT_PATH, LOG_EXPORT_PATH } from "../utils/paths";
+import { CHAT_EXPORT_PATH, LOG_EXPORT_PATH } from "../utils/constants";
 
 export type AbsolutePathHandling = "none" | "repoOnly" | "all";
 

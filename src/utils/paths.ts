@@ -2,8 +2,6 @@ import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
 
-export const LOG_EXPORT_PATH = ".log/"
-export const CHAT_EXPORT_PATH = ".chat-log/";
 const EXTHOST_DIR_PATTERN = /^exthost\d*$/i;
 
 /** Returns the first opened workspace folder's path, showing an error and returning null if none is open. */

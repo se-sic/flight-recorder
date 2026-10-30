@@ -1,7 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
-import { CHAT_EXPORT_PATH } from "../utils/paths";
+import { CHAT_EXPORT_PATH } from "../utils/constants";
 import { getLogChannel } from "../utils/logging";
 
 export type ChatExportResult =
