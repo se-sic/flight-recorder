@@ -9,11 +9,13 @@ import {
   initializeRecordingContext,
   initializeRecordingStatusBar,
   isRecording,
+  restoreRecordingBranchState,
   showAssistantLogPath,
   startRecording,
   stopRecording,
   deactivateRecording,
 } from "./recording/session";
+import { initializeRecordingHistoryPanel } from "./history-panel/controller";
 import { configureClaudeHooks } from "./recording/agents/claude/hooks";
 import { COMMAND_STATUS, EXTENSION_NAME } from "./utils/constants";
 import { initializeLogChannel } from "./utils/logging";
@@ -31,6 +33,8 @@ export function activate(context: vscode.ExtensionContext) {
   recordingStatusBarItem.name = EXTENSION_NAME + " recording status";
   initializeRecordingStatusBar(recordingStatusBarItem);
   void initializeRecordingContext();
+  restoreRecordingBranchState(context);
+  initializeRecordingHistoryPanel(context);
   context.subscriptions.push(recordingStatusBarItem);
 
   const startCmd = vscode.commands.registerCommand(

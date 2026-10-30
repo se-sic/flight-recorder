@@ -20,6 +20,10 @@ The following commands can be executed from the command palette:
 - `Flight Recorder: Export All Chats` (`flightRecorder.exportAllChats`)
 - `Flight Recorder: Anonymize Repository` (`flightRecorder.anonymizeRepo`)
 - `Flight Recorder: Edit History Visualization` (`flightRecorder.editHistoryVisualization`)
+- `Flight Recorder: Push Recording Branch` (`flightRecorder.pushTrackingBranch`)
+- `Flight Recorder: Refresh Recording History` (`flightRecorder.refreshHistory`)
+- `Flight Recorder: Copy Recording Branch Name` (`flightRecorder.copyTrackingBranch`)
+- `Flight Recorder: Recover Unfinished Recordings` (`flightRecorder.recoverRecordings`)
 - `Flight Recorder: Print Assistant Log Path` (`flightRecorder.printLog`)
 
 ## Requirements
@@ -78,6 +82,16 @@ This is conservative and reproducible, but it also means that if a user manually
 
 At the human-to-assistant boundary, Flight Recorder also prefers assistant ownership for files mentioned by the first assistant event, because VS Code document change notifications can arrive slightly before the assistant telemetry event that explains their cause.
 
+## Recording History Branch
+
+By default, Flight Recorder records into a hidden temporary worktree on an active branch named like `flight-recorder/active/<source-branch>/<session-id>`. This keeps the user's visible checkout and index untouched while recording is running.
+
+When recording stops, Flight Recorder flushes pending commits, commits the assistant log and optional chat export, fast-forwards or creates the normal branch `flight-recorder/<source-branch>`, removes the hidden worktree, and deletes the temporary active branch. If the final branch cannot be fast-forwarded safely, the temporary branch and hidden worktree are preserved for recovery instead of being force-updated.
+
+The `Flight Recorder` side panel shows the recorded commit timeline. While recording is running, the panel is read-only and push is disabled. After recording stops and the branch is finalized, `Flight Recorder: Push Recording Branch` pushes only the recording branch with an explicit Git refspec, not the user's current project branch. If the branch has no upstream and the repository has several remotes, you are asked which remote to use. The panel remembers the last recording branch across window reloads.
+
+If finalization could not complete, for example because the final branch is checked out somewhere or VS Code closed while recording, the temporary branch is kept. `Flight Recorder: Recover Unfinished Recordings` (also offered in the side panel and when starting a new recording) finalizes such leftovers. When the final branch has diverged, you can save the recording as a separate `flight-recorder/<source-branch>-<session-id>` branch instead; recording branches are never force-updated.
+
 ## Chat Export
 
 - `Flight Recorder: Export All Chats` exports the current workspace's `chatSessions` files into the opened repository under `.chat-log/<workspaceStorageId>/chatSessions`.
@@ -105,6 +119,8 @@ All settings use the `flightRecorder.*` prefix:
 - `addAll` (default `false`): stage all changed files before commit.
 - `allowEmpty` (default `false`): allow empty commits.
 - `dryRun` (default `false`): print actions without creating commits.
+- `commitMode` (default `trackingWorktree`): commit recording snapshots in a hidden tracking worktree, or directly on the current branch.
+- `trackingBranchPrefix` (default `flight-recorder`): branch prefix used for hidden active branches and finalized recording branches.
 - `forceAddGeneratedLogs` (default `true`): force-stage generated `.log` and `.chat-log` artifacts so repository ignore rules do not block their dedicated commits.
 - `exportChatsOnStop` (default `true`): automatically export chat session files into `.chat-log` and commit them in a separate shutdown commit when recording stops.
 - `absolutePathHandling` (default `repoOnly`): controls how absolute paths are rewritten during repository anonymization. `none` leaves paths unchanged, `repoOnly` rewrites only absolute paths containing the repository root, and `all` rewrites all detected absolute paths and file URIs in file contents and commit/tag messages. `absolutePathHandling` applies when running `Flight Recorder: Anonymize Repository`, including generated `.log` and `.chat-log` artifacts in repository history.

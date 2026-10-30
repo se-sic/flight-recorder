@@ -50,8 +50,42 @@
       {
         "command": "flightRecorder.editHistoryVisualization",
         "title": "Flight Recorder: Open Edit History Visualization"
+      },
+      {
+        "command": "flightRecorder.refreshHistory",
+        "title": "Flight Recorder: Refresh Recording History"
+      },
+      {
+        "command": "flightRecorder.pushTrackingBranch",
+        "title": "Flight Recorder: Push Recording Branch"
+      },
+      {
+        "command": "flightRecorder.copyTrackingBranch",
+        "title": "Flight Recorder: Copy Recording Branch Name"
+      },
+      {
+        "command": "flightRecorder.recoverRecordings",
+        "title": "Flight Recorder: Recover Unfinished Recordings"
       }
     ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "flightRecorder",
+          "title": "Flight Recorder",
+          "icon": "assets/icon.png"
+        }
+      ]
+    },
+    "views": {
+      "flightRecorder": [
+        {
+          "id": "flightRecorder.historyView",
+          "name": "Recording History",
+          "type": "webview"
+        }
+      ]
+    },
     "menus": {
       "editor/title": [
         {

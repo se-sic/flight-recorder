@@ -7,7 +7,12 @@ import {
   commitAssistantLogSnapshot,
   GitActionResult,
   GitFailureKind,
+  finalizePendingTrackingSession,
+  finalizeRecordingCommitTarget,
+  listPendingTrackingSessions,
+  PendingTrackingSession,
   prepareRecordingCommitTarget,
+  RecordingFinalizationResult,
   RecordingCommitMode,
   RecordingCommitTarget,
   validateGitRecordingReadiness,
@@ -55,11 +60,105 @@ type RecordingSession = {
   shownFailureKinds: Set<GitFailureKind>;
 };
 
+export type RecordingBranchUiState = {
+  repoRoot: string;
+  isRecording: boolean;
+  commitMode: RecordingCommitTarget["mode"];
+  assistantDisplayName?: string;
+  sourceBranchName?: string;
+  activeBranchName?: string;
+  finalBranchName?: string;
+  displayBranchName?: string;
+  commitRoot?: string;
+  finalized: boolean;
+};
+
 let running: RecordingSession | null = null;
 let stopping = false;
 let recordingStatusBarItem: vscode.StatusBarItem | null = null;
 let extensionContextRef: vscode.ExtensionContext | null = null;
 let claudeNewSessionHintShown = false;
+let recovering = false;
+let lastRecordingBranchState: RecordingBranchUiState | null = null;
+const LAST_RECORDING_BRANCH_STATE_KEY = "flightRecorder.lastRecordingBranchState";
+const recordingHistoryChangedEmitter = new vscode.EventEmitter<void>();
+
+export const onRecordingHistoryChanged = recordingHistoryChangedEmitter.event;
+
+function fireRecordingHistoryChanged(): void {
+  recordingHistoryChangedEmitter.fire();
+}
+
+/**
+ * Remembers the branch the history panel should show and persists it in
+ * workspace state, so the panel and push still work after a window reload.
+ * The persisted copy is never marked as recording, since a reload ends it.
+ */
+function setLastRecordingBranchState(state: RecordingBranchUiState | null): void {
+  lastRecordingBranchState = state;
+  void extensionContextRef?.workspaceState.update(
+    LAST_RECORDING_BRANCH_STATE_KEY,
+    state ? { ...state, isRecording: false } : undefined
+  );
+}
+
+/** Restores the last recording branch state for this workspace on activation. */
+export function restoreRecordingBranchState(
+  context: vscode.ExtensionContext
+): void {
+  extensionContextRef = context;
+  const stored = context.workspaceState.get<RecordingBranchUiState>(
+    LAST_RECORDING_BRANCH_STATE_KEY
+  );
+  const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (stored && (!workspaceRoot || stored.repoRoot === workspaceRoot)) {
+    lastRecordingBranchState = { ...stored, isRecording: false };
+  }
+}
+
+/** Builds the history-panel state for a session; `publishedBranchName` overrides the final branch after finalization. */
+function stateFromSession(
+  session: RecordingSession,
+  finalized: boolean,
+  publishedBranchName?: string
+): RecordingBranchUiState {
+  if (session.commitTarget.mode === "trackingWorktree") {
+    const finalBranchName =
+      publishedBranchName ?? session.commitTarget.finalBranchName;
+    return {
+      repoRoot: session.repoRoot,
+      isRecording: running === session,
+      commitMode: "trackingWorktree",
+      assistantDisplayName: session.assistantDisplayName,
+      sourceBranchName: session.commitTarget.sourceBranchName,
+      activeBranchName: session.commitTarget.activeBranchName,
+      finalBranchName,
+      displayBranchName: finalized
+        ? finalBranchName
+        : session.commitTarget.activeBranchName,
+      commitRoot: session.commitTarget.commitRoot,
+      finalized,
+    };
+  }
+
+  return {
+    repoRoot: session.repoRoot,
+    isRecording: running === session,
+    commitMode: "currentBranch",
+    assistantDisplayName: session.assistantDisplayName,
+    displayBranchName: undefined,
+    commitRoot: session.commitTarget.commitRoot,
+    finalized,
+  };
+}
+
+/** Returns the branch state the history panel should display: the running session, or the last finished one. */
+export function getRecordingBranchState(): RecordingBranchUiState | null {
+  if (running) {
+    return stateFromSession(running, false);
+  }
+  return lastRecordingBranchState;
+}
 
 /** Resolves a `file:` scheme URI to a normalized absolute path, or null for non-file URIs. */
 function normalizeFileUri(uri: vscode.Uri): string | null {
@@ -169,6 +268,10 @@ async function commitTrackedWindowAndReport(
     result,
     session.shownFailureKinds
   );
+
+  if (result.ok && !result.skipped) {
+    fireRecordingHistoryChanged();
+  }
 
   if (shouldStop) {
     await stopRecording();
@@ -316,6 +419,10 @@ function gitFailureUiMessage(kind: GitFailureKind, fallback: string): string {
       return `${EXTENSION_NAME} could not stage files for commit.`;
     case "commit_failed":
       return `${EXTENSION_NAME} could not create a git commit.`;
+    case "finalize_failed":
+      return `${EXTENSION_NAME} could not finalize the recording branch: ${fallback}`;
+    case "push_failed":
+      return `${EXTENSION_NAME} could not push the recording branch.`;
     case "unknown_git_error":
     default:
       return `${EXTENSION_NAME} encountered a git error: ${fallback}`;
@@ -328,7 +435,7 @@ function gitFailureUiMessage(kind: GitFailureKind, fallback: string): string {
  * severe enough (git missing, not a repo) that recording should stop.
  */
 function reportGitActionResult(
-  result: GitActionResult,
+  result: GitActionResult | RecordingFinalizationResult,
   shownFailureKinds?: Set<GitFailureKind>
 ): boolean {
   const output = getLogChannel();
@@ -342,6 +449,14 @@ function reportGitActionResult(
   if (result.ok) {
     for (const line of result.msg.split("\n")) {
       output.info(line);
+    }
+    if ("warning" in result && result.warning) {
+      for (const line of result.warning.split("\n")) {
+        output.warn(line);
+      }
+      void vscode.window.showWarningMessage(
+        `${EXTENSION_NAME}: ${result.warning}`
+      );
     }
     return false;
   }
@@ -462,7 +577,7 @@ async function maybeShowClaudeNewSessionHint(
 export async function startRecording(
   context: vscode.ExtensionContext
 ): Promise<boolean> {
-  if (running) {
+  if (running || recovering) {
     return false;
   }
 
@@ -503,6 +618,26 @@ export async function startRecording(
     return false;
   }
 
+  if (commitMode === "trackingWorktree" && !dryRun) {
+    const pending = await listPendingTrackingSessions(
+      repoRoot,
+      trackingBranchPrefix
+    );
+    if (pending.length > 0) {
+      const choice = await vscode.window.showWarningMessage(
+        `${EXTENSION_NAME} found ${pending.length} earlier recording(s) that were not finalized. Recover them before starting?`,
+        "Recover Now",
+        "Start Anyway"
+      );
+      if (!choice) {
+        return false;
+      }
+      if (choice === "Recover Now") {
+        await recoverUnfinishedRecordings();
+      }
+    }
+  }
+
   const commitTargetResult = await prepareRecordingCommitTarget(
     repoRoot,
     dryRun,
@@ -521,7 +656,10 @@ export async function startRecording(
   const commitTarget = commitTargetResult.target;
   if (commitTarget.mode === "trackingWorktree") {
     output.info(
-      `Using Flight Recorder tracking branch ${commitTarget.branchName} at ${commitTarget.commitRoot}`
+      `Using Flight Recorder active branch ${commitTarget.activeBranchName} at ${commitTarget.commitRoot}`
+    );
+    output.info(
+      `Recording will finalize to ${commitTarget.finalBranchName} when stopped.`
     );
   }
 
@@ -643,6 +781,8 @@ export async function startRecording(
     session.subscriptions.push(disposable);
   }
   running = session;
+  setLastRecordingBranchState(stateFromSession(session, false));
+  fireRecordingHistoryChanged();
   await setRecordingContext(true);
   updateRecordingStatusIndicator(true);
 
@@ -698,6 +838,9 @@ export async function stopRecording(): Promise<boolean> {
         snapshotRes,
         current.shownFailureKinds
       );
+      if (snapshotRes.ok && !snapshotRes.skipped) {
+        fireRecordingHistoryChanged();
+      }
     } else {
       output.info(
         `No ${current.assistantDisplayName} log source was attached during this recording; skipping assistant-log snapshot commit.`
@@ -739,9 +882,30 @@ export async function stopRecording(): Promise<boolean> {
             chatCommitRes,
             current.shownFailureKinds
           );
+          if (chatCommitRes.ok && !chatCommitRes.skipped) {
+            fireRecordingHistoryChanged();
+          }
         }
       }
     }
+
+    const finalizeRes = await finalizeRecordingCommitTarget(
+      current.commitTarget,
+      current.dryRun
+    );
+    reportGitActionResult(
+      finalizeRes,
+      current.shownFailureKinds
+    );
+    const finalized = finalizeRes.ok && !finalizeRes.skipped;
+    setLastRecordingBranchState(
+      stateFromSession(
+        current,
+        finalized,
+        finalized ? finalizeRes.finalBranchName : undefined
+      )
+    );
+    fireRecordingHistoryChanged();
 
     updateRecordingStatusIndicator(false);
     output.info("Stopped.");
@@ -750,6 +914,130 @@ export async function stopRecording(): Promise<boolean> {
   }
 
   return true;
+}
+
+/** Reads the configured tracking branch prefix. */
+function getTrackingBranchPrefix(): string {
+  return vscode.workspace
+    .getConfiguration("flightRecorder")
+    .get<string>("trackingBranchPrefix", "flight-recorder");
+}
+
+/**
+ * Lists active tracking branches that were never finalized, excluding the
+ * branch of the currently running session. Returns an empty list when no
+ * workspace folder is open.
+ */
+export async function listUnfinishedRecordings(): Promise<PendingTrackingSession[]> {
+  const repoRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (!repoRoot) {
+    return [];
+  }
+
+  const runningActiveBranch =
+    running?.commitTarget.mode === "trackingWorktree"
+      ? running.commitTarget.activeBranchName
+      : null;
+  const pending = await listPendingTrackingSessions(
+    repoRoot,
+    getTrackingBranchPrefix()
+  );
+  return pending.filter(
+    (session) => session.activeBranchName !== runningActiveBranch
+  );
+}
+
+/**
+ * Finalizes one unfinished recording. When its final branch has diverged,
+ * asks whether to save the recording as a separate branch instead of
+ * leaving it pending.
+ */
+async function recoverUnfinishedRecording(
+  session: PendingTrackingSession
+): Promise<RecordingFinalizationResult> {
+  const result = await finalizePendingTrackingSession(session, "preserve");
+  if (result.ok || !result.diverged) {
+    return result;
+  }
+
+  const separateBranchName = `${session.finalBranchName}-${session.sessionId}`;
+  const choice = await vscode.window.showWarningMessage(
+    `${session.finalBranchName} has moved since recording ${session.sessionId} started, so it cannot be fast-forwarded.`,
+    {
+      modal: true,
+      detail:
+        `Flight Recorder never force-updates recording branches. You can save this recording as ${separateBranchName} instead, ` +
+        "or cancel to keep it pending.",
+    },
+    "Save as Separate Branch"
+  );
+  if (choice !== "Save as Separate Branch") {
+    return result;
+  }
+  return finalizePendingTrackingSession(session, "separateBranch");
+}
+
+/**
+ * Entry point for the "Recover Unfinished Recordings" command: finalizes
+ * leftover active tracking branches (from failed finalization or a window
+ * that closed while recording) and releases their hidden worktrees.
+ */
+export async function recoverUnfinishedRecordings(): Promise<void> {
+  if (running || stopping || recovering) {
+    void vscode.window.showInformationMessage(
+      `Stop the current ${EXTENSION_NAME} recording before recovering unfinished recordings.`
+    );
+    return;
+  }
+
+  const repoRoot = getWorkspaceRepoRoot(
+    "Open a folder (git repo) before recovering recordings."
+  );
+  if (!repoRoot) {
+    return;
+  }
+
+  recovering = true;
+  try {
+    const pending = await listUnfinishedRecordings();
+    if (pending.length === 0) {
+      void vscode.window.showInformationMessage(
+        `${EXTENSION_NAME} found no unfinished recordings.`
+      );
+      return;
+    }
+
+    let recovered = 0;
+    for (const session of pending) {
+      const result = await recoverUnfinishedRecording(session);
+      reportGitActionResult(result);
+      if (result.ok && !result.skipped) {
+        recovered += 1;
+        setLastRecordingBranchState({
+          repoRoot,
+          isRecording: false,
+          commitMode: "trackingWorktree",
+          activeBranchName: session.activeBranchName,
+          finalBranchName: result.finalBranchName,
+          displayBranchName: result.finalBranchName,
+          finalized: true,
+        });
+      }
+    }
+
+    fireRecordingHistoryChanged();
+    const remaining = pending.length - recovered;
+    const summary =
+      `${EXTENSION_NAME} recovered ${recovered} of ${pending.length} unfinished recording(s).` +
+      (remaining > 0 ? " See the Flight Recorder output for the remaining ones." : "");
+    if (remaining > 0) {
+      void vscode.window.showWarningMessage(summary);
+    } else {
+      void vscode.window.showInformationMessage(summary);
+    }
+  } finally {
+    recovering = false;
+  }
 }
 
 /** Entry point for the "Print Assistant Log Path" command: shows the configured integration's primary log file path. */

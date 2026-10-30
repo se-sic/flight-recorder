@@ -13,6 +13,8 @@ export type GitFailureKind =
   | "identity_not_configured"
   | "add_failed"
   | "commit_failed"
+  | "finalize_failed"
+  | "push_failed"
   | "unknown_git_error";
 
 export type GitFailure = {
@@ -43,7 +45,57 @@ export type RecordingCommitTarget =
       sourceRoot: string;
       commitRoot: string;
       branchName: string;
+      activeBranchName: string;
+      finalBranchName: string;
       sourceBranchName: string;
+      sessionId: string;
+    };
+
+/** Command title referenced in recovery guidance messages. */
+const RECOVER_COMMAND_TITLE = "Flight Recorder: Recover Unfinished Recordings";
+
+export type GitWorktreeInfo = {
+  path: string;
+  branchName: string | null;
+};
+
+/** An active tracking branch that still has to be published onto its final branch. */
+export type PendingTrackingSession = {
+  sourceRoot: string;
+  activeBranchName: string;
+  finalBranchName: string;
+  sessionId: string;
+  worktreePath: string | null;
+};
+
+/** How finalization handles a final branch that is no longer an ancestor of the recording. */
+export type DivergedFinalizationMode = "preserve" | "separateBranch";
+
+export type RecordingFinalizationResult =
+  | {
+      ok: true;
+      skipped: false;
+      msg: string;
+      activeBranchName: string;
+      /** The branch the recording was published to (a separate branch when the final branch had diverged). */
+      finalBranchName: string;
+      head: string;
+      warning?: string;
+    }
+  | {
+      ok: true;
+      skipped: true;
+      msg: string;
+    }
+  | {
+      ok: false;
+      skipped: false;
+      msg: string;
+      err: string;
+      kind: GitFailureKind;
+      activeBranchName?: string;
+      finalBranchName?: string;
+      diverged?: boolean;
     };
 
 export type RecordingCommitTargetOptions = {
@@ -215,6 +267,14 @@ function trackingWorktreeDirectoryName(branchName: string): string {
   return sanitizeRefSegment(branchName.replace(/\//g, "__"));
 }
 
+function createTrackingSessionId(): string {
+  const stamp = new Date().toISOString()
+    .replace(/[:.]/g, "-")
+    .replace(/Z$/, "Z");
+  const suffix = Math.random().toString(36).slice(2, 8);
+  return sanitizeRefSegment(`${stamp}-${suffix}`);
+}
+
 async function readSourceBranchName(repoRoot: string): Promise<string> {
   const branch = await gitCmd(["branch", "--show-current"], repoRoot);
   const currentBranch = branch.out.trim();
@@ -281,7 +341,10 @@ export async function prepareRecordingCommitTarget(
 
   const sourceBranchName = await readSourceBranchName(sourceRoot);
   const prefix = sanitizeTrackingBranchPrefix(options.trackingBranchPrefix);
-  const branchName = `${prefix}/${sanitizeRefSegment(sourceBranchName)}`;
+  const sourceBranchSegment = sanitizeRefSegment(sourceBranchName);
+  const finalBranchName = `${prefix}/${sourceBranchSegment}`;
+  const sessionId = createTrackingSessionId();
+  const activeBranchName = `${prefix}/active/${sourceBranchSegment}/${sessionId}`;
   const commonGitDir = await readCommonGitDir(sourceRoot);
   if (commonGitDir.code !== 0) {
     const failure = classifyGitFailure(
@@ -295,7 +358,7 @@ export async function prepareRecordingCommitTarget(
   const commitRoot = path.join(
     commonGitDir.out.trim(),
     "flight-recorder-worktrees",
-    trackingWorktreeDirectoryName(branchName)
+    trackingWorktreeDirectoryName(activeBranchName)
   );
 
   if (dryRun) {
@@ -305,18 +368,39 @@ export async function prepareRecordingCommitTarget(
         mode: "trackingWorktree",
         sourceRoot,
         commitRoot,
-        branchName,
+        branchName: activeBranchName,
+        activeBranchName,
+        finalBranchName,
         sourceBranchName,
+        sessionId,
       },
+    };
+  }
+
+  const legacyRelease = await releaseLegacyTrackingWorktree(
+    sourceRoot,
+    finalBranchName
+  );
+  if (!legacyRelease.ok) {
+    return {
+      ok: false,
+      kind: "unknown_git_error",
+      msg: legacyRelease.msg,
+      err: legacyRelease.err,
     };
   }
 
   if (!fs.existsSync(commitRoot)) {
     fs.mkdirSync(path.dirname(commitRoot), { recursive: true });
-    const branchExists = await gitBranchExists(sourceRoot, branchName);
-    const addArgs = branchExists
-      ? ["worktree", "add", commitRoot, branchName]
-      : ["worktree", "add", "-b", branchName, commitRoot, "HEAD"];
+    const finalBranchExists = await gitBranchExists(sourceRoot, finalBranchName);
+    const addArgs = [
+      "worktree",
+      "add",
+      "-b",
+      activeBranchName,
+      commitRoot,
+      finalBranchExists ? finalBranchName : "HEAD",
+    ];
     const addRes = await gitCmd(addArgs, sourceRoot);
     if (addRes.code !== 0) {
       const failure = classifyGitFailure(
@@ -343,12 +427,12 @@ export async function prepareRecordingCommitTarget(
     const currentBranch = await gitCmd(["branch", "--show-current"], commitRoot);
     if (
       currentBranch.code !== 0 ||
-      currentBranch.out.trim() !== branchName
+      currentBranch.out.trim() !== activeBranchName
     ) {
       return {
         ok: false,
         kind: "unknown_git_error",
-        msg: `Flight Recorder tracking worktree is not on expected branch ${branchName}.`,
+        msg: `Flight Recorder tracking worktree is not on expected branch ${activeBranchName}.`,
         err: currentBranch.err || currentBranch.out,
       };
     }
@@ -360,10 +444,403 @@ export async function prepareRecordingCommitTarget(
       mode: "trackingWorktree",
       sourceRoot,
       commitRoot,
-      branchName,
+      branchName: activeBranchName,
+      activeBranchName,
+      finalBranchName,
       sourceBranchName,
+      sessionId,
     },
   };
+}
+
+/** Reads the commit hash a branch points at. */
+async function readBranchHead(
+  repoRoot: string,
+  branchName: string
+): Promise<GitCommandResult> {
+  return gitCmd(["rev-parse", "--verify", branchName], repoRoot);
+}
+
+/** Returns whether `ancestorRef` is an ancestor of (or equal to) `descendantRef`. */
+async function isAncestor(
+  repoRoot: string,
+  ancestorRef: string,
+  descendantRef: string
+): Promise<boolean> {
+  const res = await gitCmd(
+    ["merge-base", "--is-ancestor", ancestorRef, descendantRef],
+    repoRoot
+  );
+  return res.code === 0;
+}
+
+/** Resolves symlinks (e.g. macOS /var → /private/var) so paths from git and from Node compare equal. */
+function canonicalPath(candidate: string): string {
+  try {
+    return fs.realpathSync(candidate);
+  } catch {
+    return path.resolve(candidate);
+  }
+}
+
+/** Returns whether `candidate` is `parent` itself or lies inside it. */
+function isPathInside(candidate: string, parent: string): boolean {
+  const rel = path.relative(canonicalPath(parent), canonicalPath(candidate));
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+/** Lists the repository's worktrees with the short branch name each one has checked out. */
+async function listWorktrees(repoRoot: string): Promise<GitWorktreeInfo[]> {
+  const res = await gitCmd(["worktree", "list", "--porcelain"], repoRoot);
+  if (res.code !== 0) {
+    return [];
+  }
+
+  const worktrees: GitWorktreeInfo[] = [];
+  let current: GitWorktreeInfo | null = null;
+  for (const line of res.out.split("\n")) {
+    if (line.startsWith("worktree ")) {
+      current = { path: line.slice("worktree ".length), branchName: null };
+      worktrees.push(current);
+    } else if (line.startsWith("branch ") && current) {
+      current.branchName = line
+        .slice("branch ".length)
+        .replace(/^refs\/heads\//, "");
+    }
+  }
+  return worktrees;
+}
+
+/**
+ * Removes a clean hidden worktree left behind by the earlier tracking model,
+ * which kept the final branch itself checked out under
+ * `.git/flight-recorder-worktrees/`. While it exists, git refuses to move the
+ * final branch, so finalization would always fail.
+ */
+async function releaseLegacyTrackingWorktree(
+  sourceRoot: string,
+  finalBranchName: string
+): Promise<{ ok: true } | { ok: false; msg: string; err: string }> {
+  const commonGitDir = await readCommonGitDir(sourceRoot);
+  if (commonGitDir.code !== 0) {
+    return { ok: true };
+  }
+
+  const trackingRoot = path.join(
+    commonGitDir.out.trim(),
+    "flight-recorder-worktrees"
+  );
+  const legacy = (await listWorktrees(sourceRoot)).find(
+    (worktree) =>
+      worktree.branchName === finalBranchName &&
+      isPathInside(worktree.path, trackingRoot)
+  );
+  if (!legacy) {
+    return { ok: true };
+  }
+
+  const status = await gitCmd(["status", "--porcelain"], legacy.path);
+  if (status.code !== 0 || status.out.trim().length > 0) {
+    return {
+      ok: false,
+      msg:
+        `An older Flight Recorder worktree at ${legacy.path} still has ${finalBranchName} checked out ` +
+        "with uncommitted changes. Commit or discard them there, then try again.",
+      err: status.err || status.out,
+    };
+  }
+
+  const removeRes = await gitCmd(
+    ["worktree", "remove", legacy.path],
+    sourceRoot
+  );
+  if (removeRes.code !== 0) {
+    return {
+      ok: false,
+      msg: `Failed to remove the older Flight Recorder worktree at ${legacy.path}.`,
+      err: removeRes.err || removeRes.out,
+    };
+  }
+  return { ok: true };
+}
+
+/**
+ * Lists active tracking branches (`<prefix>/active/<source>/<sessionId>`)
+ * that were never finalized, e.g. because finalization failed or VS Code
+ * exited while recording.
+ */
+export async function listPendingTrackingSessions(
+  repoRoot: string,
+  trackingBranchPrefix: string
+): Promise<PendingTrackingSession[]> {
+  const sourceRoot = path.resolve(repoRoot);
+  const prefix = sanitizeTrackingBranchPrefix(trackingBranchPrefix);
+  const activeNamespace = `${prefix}/active/`;
+  const refs = await gitCmd(
+    ["for-each-ref", "--format=%(refname)", `refs/heads/${activeNamespace}`],
+    sourceRoot
+  );
+  if (refs.code !== 0) {
+    return [];
+  }
+
+  const worktrees = await listWorktrees(sourceRoot);
+  const sessions: PendingTrackingSession[] = [];
+  for (const ref of refs.out.split("\n").map((line) => line.trim())) {
+    const activeBranchName = ref.replace(/^refs\/heads\//, "");
+    if (!activeBranchName.startsWith(activeNamespace)) {
+      continue;
+    }
+
+    const rest = activeBranchName.slice(activeNamespace.length);
+    const slash = rest.lastIndexOf("/");
+    if (slash <= 0 || slash === rest.length - 1) {
+      continue;
+    }
+
+    sessions.push({
+      sourceRoot,
+      activeBranchName,
+      finalBranchName: `${prefix}/${rest.slice(0, slash)}`,
+      sessionId: rest.slice(slash + 1),
+      worktreePath:
+        worktrees.find((worktree) => worktree.branchName === activeBranchName)
+          ?.path ?? null,
+    });
+  }
+  return sessions;
+}
+
+/**
+ * Publishes an active tracking branch onto its final branch, then releases
+ * the hidden worktree and deletes the active branch. The final branch is only
+ * created or fast-forwarded. If it has diverged, `divergedMode` decides
+ * whether to stop (keeping everything for recovery) or to publish the
+ * recording as a separate `<final>-<sessionId>` branch instead. Cleanup
+ * failures after publishing are reported as warnings, not failures, because
+ * the recorded history is already safe on the final branch.
+ */
+async function finalizeTrackingSession(
+  session: PendingTrackingSession,
+  divergedMode: DivergedFinalizationMode
+): Promise<RecordingFinalizationResult> {
+  const { sourceRoot, activeBranchName, finalBranchName } = session;
+  const fail = (
+    msg: string,
+    err: string,
+    diverged = false
+  ): RecordingFinalizationResult => ({
+    ok: false,
+    skipped: false,
+    kind: "finalize_failed",
+    activeBranchName,
+    finalBranchName,
+    msg,
+    err,
+    diverged,
+  });
+
+  const worktreePath =
+    session.worktreePath && fs.existsSync(session.worktreePath)
+      ? session.worktreePath
+      : null;
+  if (worktreePath) {
+    const status = await gitCmd(["status", "--porcelain"], worktreePath);
+    if (status.code !== 0) {
+      const failure = classifyGitFailure(
+        "validate",
+        status,
+        `Failed to inspect Flight Recorder worktree at ${worktreePath}.`
+      );
+      return fail(failure.msg, failure.err);
+    }
+    if (status.out.trim().length > 0) {
+      return fail(
+        `Flight Recorder hidden worktree at ${worktreePath} has uncommitted changes; preserving it for recovery.`,
+        status.out
+      );
+    }
+  }
+
+  const activeHead = await readBranchHead(sourceRoot, activeBranchName);
+  if (activeHead.code !== 0 || activeHead.out.trim().length === 0) {
+    const failure = classifyGitFailure(
+      "validate",
+      activeHead,
+      `Failed to resolve active Flight Recorder branch ${activeBranchName}.`
+    );
+    return fail(failure.msg, failure.err);
+  }
+  const head = activeHead.out.trim();
+
+  const legacyRelease = await releaseLegacyTrackingWorktree(
+    sourceRoot,
+    finalBranchName
+  );
+  if (!legacyRelease.ok) {
+    return fail(legacyRelease.msg, legacyRelease.err);
+  }
+
+  let publishedBranchName = finalBranchName;
+  if (!(await gitBranchExists(sourceRoot, finalBranchName))) {
+    const createRes = await gitCmd(
+      ["branch", finalBranchName, head],
+      sourceRoot
+    );
+    if (createRes.code !== 0) {
+      const failure = classifyGitFailure(
+        "validate",
+        createRes,
+        `Failed to create ${finalBranchName} at ${head}.`
+      );
+      return fail(failure.msg, failure.err);
+    }
+  } else if (await isAncestor(sourceRoot, activeBranchName, finalBranchName)) {
+    // Already published by an earlier attempt whose cleanup failed.
+  } else if (await isAncestor(sourceRoot, finalBranchName, activeBranchName)) {
+    const holder = (await listWorktrees(sourceRoot)).find(
+      (worktree) =>
+        worktree.branchName === finalBranchName &&
+        (!worktreePath || canonicalPath(worktree.path) !== canonicalPath(worktreePath))
+    );
+    if (holder) {
+      return fail(
+        `${finalBranchName} is checked out at ${holder.path}, so Flight Recorder cannot move it. ` +
+          `Switch that checkout to another branch, then run "${RECOVER_COMMAND_TITLE}".`,
+        `${finalBranchName} is checked out in worktree ${holder.path}.`
+      );
+    }
+
+    const moveRes = await gitCmd(
+      ["branch", "-f", finalBranchName, head],
+      sourceRoot
+    );
+    if (moveRes.code !== 0) {
+      const failure = classifyGitFailure(
+        "validate",
+        moveRes,
+        `Failed to move ${finalBranchName} to ${head}.`
+      );
+      return fail(failure.msg, failure.err);
+    }
+  } else if (divergedMode === "separateBranch") {
+    publishedBranchName = `${finalBranchName}-${session.sessionId}`;
+    if (await gitBranchExists(sourceRoot, publishedBranchName)) {
+      return fail(
+        `Cannot save the recording as ${publishedBranchName} because that branch already exists.`,
+        `${publishedBranchName} already exists.`
+      );
+    }
+    const createRes = await gitCmd(
+      ["branch", publishedBranchName, head],
+      sourceRoot
+    );
+    if (createRes.code !== 0) {
+      const failure = classifyGitFailure(
+        "validate",
+        createRes,
+        `Failed to create ${publishedBranchName} at ${head}.`
+      );
+      return fail(failure.msg, failure.err);
+    }
+  } else {
+    return fail(
+      `${finalBranchName} has moved since this recording started, so it cannot be fast-forwarded to ${activeBranchName}. ` +
+        `The recording was preserved; run "${RECOVER_COMMAND_TITLE}" to save it.`,
+      `${finalBranchName} is not an ancestor of ${activeBranchName}.`,
+      true
+    );
+  }
+
+  const warnings: string[] = [];
+  const removeRes = worktreePath
+    ? await gitCmd(["worktree", "remove", worktreePath], sourceRoot)
+    : await gitCmd(["worktree", "prune"], sourceRoot);
+  if (removeRes.code !== 0) {
+    warnings.push(
+      `Could not remove hidden worktree ${worktreePath ?? "(prune)"}: ${(removeRes.err || removeRes.out).trim()}`
+    );
+  }
+
+  const deleteRes = await gitCmd(["branch", "-D", activeBranchName], sourceRoot);
+  if (deleteRes.code !== 0) {
+    warnings.push(
+      `Could not delete temporary branch ${activeBranchName}: ${(deleteRes.err || deleteRes.out).trim()}`
+    );
+  }
+
+  const msgLines = [
+    `Finalized Flight Recorder history on ${publishedBranchName} at ${head.slice(0, 12)}.`,
+  ];
+  if (publishedBranchName !== finalBranchName) {
+    msgLines.push(
+      `${finalBranchName} had diverged, so the recording was saved as a separate branch.`
+    );
+  }
+  if (worktreePath && removeRes.code === 0) {
+    msgLines.push(`Removed hidden worktree ${worktreePath}.`);
+  }
+
+  return {
+    ok: true,
+    skipped: false,
+    activeBranchName,
+    finalBranchName: publishedBranchName,
+    head,
+    msg: msgLines.join("\n"),
+    warning:
+      warnings.length > 0
+        ? `${warnings.join("\n")}\nThe recording is safe on ${publishedBranchName}; run "${RECOVER_COMMAND_TITLE}" to retry the cleanup.`
+        : undefined,
+  };
+}
+
+/**
+ * Promotes a completed active tracking branch to the normal user-facing
+ * recording branch when recording stops. Diverged final branches are never
+ * force-updated; the active branch and worktree are kept for recovery.
+ */
+export async function finalizeRecordingCommitTarget(
+  target: RecordingCommitTarget,
+  dryRun: boolean
+): Promise<RecordingFinalizationResult> {
+  if (target.mode !== "trackingWorktree") {
+    return {
+      ok: true,
+      skipped: true,
+      msg: "No tracking worktree finalization needed for current-branch recording.",
+    };
+  }
+
+  if (dryRun) {
+    return {
+      ok: true,
+      skipped: true,
+      msg:
+        `[dry-run] would fast-forward ${target.finalBranchName} to ${target.activeBranchName}\n` +
+        `[dry-run] would remove hidden worktree ${target.commitRoot}\n` +
+        `[dry-run] would delete temporary branch ${target.activeBranchName}`,
+    };
+  }
+
+  return finalizeTrackingSession(
+    {
+      sourceRoot: target.sourceRoot,
+      activeBranchName: target.activeBranchName,
+      finalBranchName: target.finalBranchName,
+      sessionId: target.sessionId,
+      worktreePath: target.commitRoot,
+    },
+    "preserve"
+  );
+}
+
+/** Finalizes a leftover active tracking branch found by `listPendingTrackingSessions`. */
+export async function finalizePendingTrackingSession(
+  session: PendingTrackingSession,
+  divergedMode: DivergedFinalizationMode
+): Promise<RecordingFinalizationResult> {
+  return finalizeTrackingSession(session, divergedMode);
 }
 
 /** Extracts file paths from `git status --porcelain` output, using the new-name side of renames. */
@@ -630,7 +1107,10 @@ async function stageAndCommit(
     return {
       ok: true,
       skipped: false,
-      msg: `${msg}\ntrackingBranch: ${target.branchName}`,
+      msg:
+        `${msg}\n` +
+        `activeTrackingBranch: ${target.activeBranchName}\n` +
+        `finalTrackingBranch: ${target.finalBranchName}`,
       err: res.err,
     };
   }
