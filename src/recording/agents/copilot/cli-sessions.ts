@@ -103,6 +103,31 @@ export async function findCopilotCliSessionsForRepo(
 }
 
 /**
+ * Keeps the sessions with activity at or after `since`, judged by the newest
+ * modification time of their session files (e.g. to export only sessions
+ * that were used during a recording).
+ */
+export async function copilotCliSessionsActiveSince(
+  sessions: CopilotCliSession[],
+  since: Date
+): Promise<CopilotCliSession[]> {
+  const active = await Promise.all(
+    sessions.map(async (session) => {
+      const mtimes = await Promise.all(
+        COPILOT_CLI_SESSION_FILES.map((file) =>
+          fs.promises.stat(path.join(session.dir, file)).then(
+            (stat) => stat.mtimeMs,
+            () => 0
+          )
+        )
+      );
+      return Math.max(...mtimes) >= since.getTime();
+    })
+  );
+  return sessions.filter((_, index) => active[index]);
+}
+
+/**
  * Resolves a CLI-reported path and lowercases its Windows drive letter, the
  * way VS Code's `Uri.fsPath` does, so it matches workspace change paths.
  */

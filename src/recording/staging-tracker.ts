@@ -53,6 +53,13 @@ type TextSnapshot = { at: number; text: string };
  */
 const ASSISTANT_EVENT_LAG_MS = 1_000;
 
+/**
+ * How long an assistant window waits for a running tool's completion signal
+ * without any other activity, in case the signal never arrives (e.g. the
+ * user interrupted the assistant).
+ */
+const MAX_TOOL_RUN_IDLE_MS = 5 * 60_000;
+
 export type FileAttribution = {
   path: string;
   origin: EditOrigin;
@@ -83,6 +90,10 @@ type AssistantWindowState = {
   events: AssistantEvent[];
   fileAttributions: Map<string, FileAttribution>;
   awaitingMaterialization: boolean;
+  /** Claims every workspace change, because an event named no files or ran a tool that can change anything. */
+  openEnded: boolean;
+  /** Tools reported as started but not yet finished (see `AssistantEvent.toolCall`). */
+  runningTools: Set<string>;
 };
 
 /** Resolves paths to absolute form, dropping blanks and duplicates, and returns them sorted. */
@@ -396,8 +407,25 @@ export class FineGrainedStagingTracker {
     return (
       event.kind === "tool-called" &&
       event.capability === "tool-call" &&
+      event.toolCall === undefined &&
       collectEventFilePaths(event).length > 0
     );
+  }
+
+  /** Tracks the start and end of tool runs reported by `event` in the open assistant window. */
+  private applyToolCallPhase(event: AssistantEvent): void {
+    const state = this.assistantState;
+    if (!state || !event.toolCall) {
+      return;
+    }
+    const { id, phase } = event.toolCall;
+    if (phase === "started") {
+      state.runningTools.add(id ?? `${event.timestamp}:${state.runningTools.size}`);
+    } else if (id === undefined) {
+      state.runningTools.clear();
+    } else {
+      state.runningTools.delete(id);
+    }
   }
 
   /** Records path-only workspace changes, preserving unrelated human edits during assistant windows. */
@@ -412,13 +440,31 @@ export class FineGrainedStagingTracker {
       this.humanState.texts.delete(filePath);
     }
 
+    this.routePathChanges(normalized, at);
+  }
+
+  /**
+   * Records on-disk changes seen by a file watcher (e.g. made by a shell
+   * command). Unlike `recordHumanChange`, this keeps editor text snapshots,
+   * because a watcher also reports every ordinary save.
+   */
+  recordDiskChange(paths: Iterable<string>, at = Date.now()): void {
+    this.routePathChanges(normalizePaths(paths), at);
+  }
+
+  /** Assigns changed paths to the open assistant window when it claims them, otherwise to the human window. */
+  private routePathChanges(normalized: string[], at: number): void {
+    if (normalized.length === 0) {
+      return;
+    }
+
     if (this.assistantState) {
       const knownAssistantFiles = this.assistantState.files;
-      const hasConcreteAssistantFiles = knownAssistantFiles.size > 0;
+      const claimsEverything = this.assistantState.openEnded;
       const humanPaths: string[] = [];
 
       for (const filePath of normalized) {
-        if (!hasConcreteAssistantFiles || knownAssistantFiles.has(filePath)) {
+        if (claimsEverything || knownAssistantFiles.has(filePath)) {
           this.assistantState.files.add(filePath);
           this.assistantState.lastActivityAt = at;
           this.assistantState.awaitingMaterialization = false;
@@ -462,11 +508,11 @@ export class FineGrainedStagingTracker {
     }
 
     const knownAssistantFiles = this.assistantState.files;
-    const hasConcreteAssistantFiles = knownAssistantFiles.size > 0;
+    const claimsEverything = this.assistantState.openEnded;
     const humanChanges: WorkspaceTextChange[] = [];
 
     for (const change of normalizedChanges) {
-      if (!hasConcreteAssistantFiles || knownAssistantFiles.has(change.path)) {
+      if (claimsEverything || knownAssistantFiles.has(change.path)) {
         this.assistantState.files.add(change.path);
         this.assistantState.lastActivityAt = at;
         this.assistantState.awaitingMaterialization = false;
@@ -551,6 +597,17 @@ export class FineGrainedStagingTracker {
     event: AssistantEvent,
     at = Date.now()
   ): WindowCommit[] {
+    // Reads and searches change nothing: they never open a window or claim
+    // files, but keep an open window alive and may end running tools.
+    if (event.capability === "read-only") {
+      if (this.assistantState) {
+        this.assistantState.lastActivityAt = at;
+        this.assistantState.events.push(event);
+        this.applyToolCallPhase(event);
+      }
+      return [];
+    }
+
     const commits: WindowCommit[] = [];
     const assistantPaths = normalizePaths(collectEventFilePaths(event));
     const snapshots: Record<string, string> = {};
@@ -591,11 +648,17 @@ export class FineGrainedStagingTracker {
         events: [],
         fileAttributions: new Map<string, FileAttribution>(),
         awaitingMaterialization,
+        openEnded: false,
+        runningTools: new Set<string>(),
       };
     }
 
     this.assistantState.lastActivityAt = at;
     this.assistantState.events.push(event);
+    this.applyToolCallPhase(event);
+    if (assistantPaths.length === 0 || event.capability === "command" || event.toolCall) {
+      this.assistantState.openEnded = true;
+    }
     if (!this.isDeferredAssistantBoundary(event)) {
       this.assistantState.awaitingMaterialization = false;
     }
@@ -615,6 +678,13 @@ export class FineGrainedStagingTracker {
   /** Closes and returns the assistant window if its debounce timeout has elapsed. */
   flushAssistantWindowIfIdle(at = Date.now()): WindowCommit | null {
     if (!this.assistantState) {
+      return null;
+    }
+
+    if (
+      this.assistantState.runningTools.size > 0 &&
+      at - this.assistantState.lastActivityAt < MAX_TOOL_RUN_IDLE_MS
+    ) {
       return null;
     }
 

@@ -15,7 +15,25 @@ type ClaudeHookEventPayload = {
   file_path?: string;
   event?: string;
   cwd?: string;
+  tool_use_id?: string;
 };
+
+/** Claude Code tools that only read or search and never change files. */
+const READ_ONLY_TOOLS = new Set([
+  "Read",
+  "Grep",
+  "Glob",
+  "LS",
+  "NotebookRead",
+  "WebFetch",
+  "WebSearch",
+  "TodoRead",
+  "TodoWrite",
+  "BashOutput",
+  "ExitPlanMode",
+  "ListMcpResourcesTool",
+  "ReadMcpResourceTool",
+]);
 
 type ClaudeTranscriptEntry = Record<string, unknown>;
 
@@ -67,6 +85,9 @@ function mapToolNameToCapability(toolName: string): AssistantCapability {
   }
   if (toolName === "Bash") {
     return "command";
+  }
+  if (READ_ONLY_TOOLS.has(toolName)) {
+    return "read-only";
   }
   if (toolName.startsWith("mcp__")) {
     return "tool-call";
@@ -265,6 +286,7 @@ export class ClaudeCodeParser {
           fileOperations: inferFileOperationsFromTool(toolName, payload.tool_input),
           sessionId: payload.session_id,
           toolName,
+          origin: "assistant-tool-edit",
           metadata: {
             transcriptPath: payload.transcript_path,
             cwd: payload.cwd,
@@ -290,6 +312,7 @@ export class ClaudeCodeParser {
           ),
           sessionId: payload.session_id,
           toolName,
+          origin: "assistant-tool-edit",
           metadata: {
             transcriptPath: payload.transcript_path,
             cwd: payload.cwd,
@@ -299,10 +322,20 @@ export class ClaudeCodeParser {
         };
       }
 
+      const capability = mapToolNameToCapability(toolName);
+      // Tools other than edits and reads (Bash, MCP tools, subagents, ...)
+      // may change any file while they run; mark their start and end.
+      const toolCall: AssistantEvent["toolCall"] =
+        capability === "read-only" || isFileEditTool
+          ? undefined
+          : {
+            id: payload.tool_use_id,
+            phase: payload.hook_event_name === "PreToolUse" ? "started" : "finished",
+          };
       return {
         timestamp,
         kind: "tool-called",
-        capability: mapToolNameToCapability(toolName),
+        capability,
         source: {
           assistantId: "claude-code",
           adapterId: "claude-hook-log-parser",
@@ -311,11 +344,29 @@ export class ClaudeCodeParser {
         fileOperations: inferFileOperationsFromTool(toolName, payload.tool_input),
         sessionId: payload.session_id,
         toolName,
+        ...(toolCall ? { toolCall } : {}),
         metadata: {
           transcriptPath: payload.transcript_path,
           cwd: payload.cwd,
           toolInput: payload.tool_input,
         },
+      };
+    }
+
+    // A finished turn or a new prompt means no tool from before is still running.
+    if (payload.hook_event_name === "Stop" || payload.hook_event_name === "UserPromptSubmit") {
+      return {
+        timestamp,
+        kind: "response-produced",
+        capability: "read-only",
+        source: {
+          assistantId: "claude-code",
+          adapterId: "claude-hook-log-parser",
+          rawSignal: payload.hook_event_name,
+        },
+        fileOperations: [],
+        sessionId: payload.session_id,
+        toolCall: { phase: "finished" },
       };
     }
 
@@ -396,6 +447,7 @@ export class ClaudeCodeParser {
           },
         ],
         sessionId,
+        origin: "assistant-tool-edit",
         metadata: {
           structuredPatch: toolUseResult.structuredPatch,
           userModified: toolUseResult.userModified,
@@ -457,6 +509,7 @@ export class ClaudeCodeParser {
           fileOperations: inferFileOperationsFromTool(toolName, toolInput),
           sessionId,
           toolName,
+          origin: "assistant-tool-edit",
           metadata: toolInput ? { toolInput } : undefined,
         });
         continue;

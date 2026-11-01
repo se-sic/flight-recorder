@@ -3,6 +3,7 @@ import * as path from "path";
 import * as vscode from "vscode";
 import {
   COPILOT_CLI_SESSION_FILES,
+  copilotCliSessionsActiveSince,
   findCopilotCliSessionsForRepo,
   getCopilotCliSessionStateDir,
 } from "./agents/copilot/cli-sessions";
@@ -90,7 +91,8 @@ function uniqueSessionName(
 export async function exportCurrentWorkspaceChats(
   context: vscode.ExtensionContext,
   repoRoot: string,
-  outputRoot = repoRoot
+  outputRoot = repoRoot,
+  activeSince?: Date
 ): Promise<ChatExportResult> {
   const currentWsStorageUri = context.storageUri; // per-workspace storage
   if (!currentWsStorageUri) {
@@ -105,13 +107,31 @@ export async function exportCurrentWorkspaceChats(
   getLogChannel().info(`Current workspace storage: ${workspaceDir}`);
   const chatSessionsDir = path.join(workspaceDir, "chatSessions");
 
-  const sessionFiles = (await safeReadDirFilesOnly(chatSessionsDir)).filter((f) =>
+  let sessionFiles = (await safeReadDirFilesOnly(chatSessionsDir)).filter((f) =>
     f.toLowerCase().endsWith(".json") || f.toLowerCase().endsWith(".jsonl")
   );
 
   // Copilot CLI agent sessions live outside VS Code's workspace storage.
   const cliStateDir = getCopilotCliSessionStateDir();
-  const cliSessions = await findCopilotCliSessionsForRepo(repoRoot, cliStateDir);
+  let cliSessions = await findCopilotCliSessionsForRepo(repoRoot, cliStateDir);
+
+  // A recording only exports sessions used while it ran, never older ones.
+  if (activeSince) {
+    const since = activeSince.getTime();
+    const modified = await Promise.all(
+      sessionFiles.map((f) =>
+        fs.promises.stat(path.join(chatSessionsDir, f)).then(
+          (stat) => stat.mtimeMs >= since,
+          () => false
+        )
+      )
+    );
+    sessionFiles = sessionFiles.filter((_, index) => modified[index]);
+    cliSessions = await copilotCliSessionsActiveSince(cliSessions, activeSince);
+    if (sessionFiles.length === 0 && cliSessions.length === 0) {
+      return { ok: true, count: 0, destDir: path.join(outputRoot, CHAT_EXPORT_PATH) };
+    }
+  }
 
   if (sessionFiles.length === 0 && cliSessions.length === 0) {
     return {

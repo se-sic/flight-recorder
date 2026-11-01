@@ -153,12 +153,18 @@ async function readAheadBehind(
 export async function readRecordingHistory(
   repoRoot: string,
   branchName: string,
+  sourceBranchName?: string,
   limit = 50
 ): Promise<RecordingHistory | null> {
   if (!(await branchExists(repoRoot, branchName))) {
     return null;
   }
 
+  // Hide the source branch's own history, which the recording branch starts from.
+  const excludeSource =
+    sourceBranchName !== undefined &&
+    sourceBranchName !== branchName &&
+    (await branchExists(repoRoot, sourceBranchName));
   const log = await gitCmd(
     [
       "log",
@@ -166,6 +172,7 @@ export async function readRecordingHistory(
       "--date=iso-strict",
       "--format=%H%x1f%h%x1f%aI%x1f%an%x1f%B%x1e",
       branchName,
+      ...(excludeSource ? ["--not", `refs/heads/${sourceBranchName}`] : []),
       "--",
     ],
     repoRoot
@@ -246,9 +253,14 @@ export async function pushRecordingBranch(
     repoRoot
   );
   if (res.code !== 0) {
+    const output = `${res.err}\n${res.out}`;
+    const rejectedAsBehind = /non-fast-forward|fetch first|\[rejected\]/.test(output);
     return {
       ok: false,
-      msg: `Failed to push ${branchName} to ${pushRemote}.`,
+      msg: rejectedAsBehind
+        ? `${pushRemote} already has newer commits on ${branchName}, so the push was rejected. ` +
+          "Flight Recorder never force-pushes; merge the remote commits into the recording branch first, or push to another remote."
+        : `Failed to push ${branchName} to ${pushRemote}.`,
       err: res.err || res.out,
     };
   }

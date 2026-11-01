@@ -11,6 +11,7 @@ import { LOG_EXPORT_PATH } from "../utils/constants";
 export type GitFailureKind =
   | "git_not_found"
   | "not_a_repo"
+  | "no_commits"
   | "identity_not_configured"
   | "add_failed"
   | "commit_failed"
@@ -264,6 +265,20 @@ function sanitizeTrackingBranchPrefix(value: string): string {
   return segments.length > 0 ? segments.join("/") : "flight-recorder";
 }
 
+/**
+ * Ref namespace of active (not yet finalized) tracking branches. It sits next
+ * to `<prefix>/` rather than inside it, so no source branch name (not even
+ * `active`) can clash with it.
+ */
+function activeBranchNamespace(prefix: string): string {
+  return `${prefix}-active/`;
+}
+
+/** Namespace older versions used for active branches; still scanned for recovery. */
+function legacyActiveBranchNamespace(prefix: string): string {
+  return `${prefix}/active/`;
+}
+
 function trackingWorktreeDirectoryName(branchName: string): string {
   return sanitizeRefSegment(branchName.replace(/\//g, "__"));
 }
@@ -340,12 +355,23 @@ export async function prepareRecordingCommitTarget(
     };
   }
 
+  // Recording branches start from HEAD, so an empty repository cannot be tracked.
+  const head = await gitCmd(["rev-parse", "--verify", "-q", "HEAD"], sourceRoot);
+  if (head.code !== 0) {
+    return {
+      ok: false,
+      kind: "no_commits",
+      msg: "The repository has no commits yet. Create a first commit before recording.",
+      err: head.err,
+    };
+  }
+
   const sourceBranchName = await readSourceBranchName(sourceRoot);
   const prefix = sanitizeTrackingBranchPrefix(options.trackingBranchPrefix);
   const sourceBranchSegment = sanitizeRefSegment(sourceBranchName);
   const finalBranchName = `${prefix}/${sourceBranchSegment}`;
   const sessionId = createTrackingSessionId();
-  const activeBranchName = `${prefix}/active/${sourceBranchSegment}/${sessionId}`;
+  const activeBranchName = `${activeBranchNamespace(prefix)}${sourceBranchSegment}/${sessionId}`;
   const commonGitDir = await readCommonGitDir(sourceRoot);
   if (commonGitDir.code !== 0) {
     const failure = classifyGitFailure(
@@ -566,9 +592,9 @@ async function releaseLegacyTrackingWorktree(
 }
 
 /**
- * Lists active tracking branches (`<prefix>/active/<source>/<sessionId>`)
- * that were never finalized, e.g. because finalization failed or VS Code
- * exited while recording.
+ * Lists active tracking branches (`<prefix>-active/<source>/<sessionId>`, or
+ * the older `<prefix>/active/...`) that were never finalized, e.g. because
+ * finalization failed or VS Code exited while recording.
  */
 export async function listPendingTrackingSessions(
   repoRoot: string,
@@ -576,9 +602,13 @@ export async function listPendingTrackingSessions(
 ): Promise<PendingTrackingSession[]> {
   const sourceRoot = path.resolve(repoRoot);
   const prefix = sanitizeTrackingBranchPrefix(trackingBranchPrefix);
-  const activeNamespace = `${prefix}/active/`;
+  const namespaces = [activeBranchNamespace(prefix), legacyActiveBranchNamespace(prefix)];
   const refs = await gitCmd(
-    ["for-each-ref", "--format=%(refname)", `refs/heads/${activeNamespace}`],
+    [
+      "for-each-ref",
+      "--format=%(refname)",
+      ...namespaces.map((namespace) => `refs/heads/${namespace}`),
+    ],
     sourceRoot
   );
   if (refs.code !== 0) {
@@ -589,7 +619,10 @@ export async function listPendingTrackingSessions(
   const sessions: PendingTrackingSession[] = [];
   for (const ref of refs.out.split("\n").map((line) => line.trim())) {
     const activeBranchName = ref.replace(/^refs\/heads\//, "");
-    if (!activeBranchName.startsWith(activeNamespace)) {
+    const activeNamespace = namespaces.find((namespace) =>
+      activeBranchName.startsWith(namespace)
+    );
+    if (!activeNamespace) {
       continue;
     }
 
@@ -836,6 +869,22 @@ export async function finalizeRecordingCommitTarget(
   );
 }
 
+/**
+ * Removes the hidden worktree and active branch of a session that never
+ * started recording. Only call this before any commit was made on the branch.
+ */
+export async function discardRecordingCommitTarget(
+  target: RecordingCommitTarget,
+  dryRun: boolean
+): Promise<void> {
+  if (target.mode !== "trackingWorktree" || dryRun) {
+    return;
+  }
+  await gitCmd(["worktree", "remove", "--force", target.commitRoot], target.sourceRoot);
+  await gitCmd(["worktree", "prune"], target.sourceRoot);
+  await gitCmd(["branch", "-D", target.activeBranchName], target.sourceRoot);
+}
+
 /** Finalizes a leftover active tracking branch found by `listPendingTrackingSessions`. */
 export async function finalizePendingTrackingSession(
   session: PendingTrackingSession,
@@ -954,23 +1003,58 @@ function copySnapshotIntoCommitTarget(
   });
 }
 
-async function changedFilesForCommit(
-  sourceRoot: string,
-  relFiles: string[],
-  addAll: boolean
-): Promise<string[]> {
-  if (addAll) {
-    return listAllChangedFiles(sourceRoot);
-  }
+/** Converts a repo-relative path to git's forward-slash spelling. */
+function toGitPath(rel: string): string {
+  return rel.split(path.sep).join("/");
+}
 
-  const changedFiles: string[] = [];
-  for (const rel of relFiles) {
-    const changed = await fileHasChanges(sourceRoot, rel);
-    if (changed) {
-      changedFiles.push(rel);
-    }
+/** Returns whether `filePath` exists, counting broken symlinks as existing. */
+function pathExists(filePath: string): boolean {
+  try {
+    fs.lstatSync(filePath);
+    return true;
+  } catch {
+    return false;
   }
-  return changedFiles;
+}
+
+/**
+ * Drops paths that git ignores in `root`, so they are neither staged nor
+ * committed. Tracked files are never reported as ignored by git.
+ */
+async function withoutIgnoredPaths(root: string, rels: string[]): Promise<string[]> {
+  if (rels.length === 0) {
+    return rels;
+  }
+  const res = await gitCmd(["check-ignore", "-z", "--stdin"], root, {
+    input: rels.map(toGitPath).join("\0") + "\0",
+  });
+  // Exit code 1 means nothing is ignored; anything else but 0 is an error we
+  // let the following git add report.
+  if (res.code !== 0) {
+    return rels;
+  }
+  const ignored = new Set(res.out.split("\0").filter(Boolean));
+  return rels.filter((rel) => !ignored.has(toGitPath(rel)));
+}
+
+/**
+ * Drops paths that neither exist in `root` nor are tracked in `trackedRoot`,
+ * which `git add` would reject (e.g. a temporary file created and deleted
+ * within one window).
+ */
+async function withoutUnknownMissingPaths(
+  root: string,
+  rels: string[],
+  trackedRoot = root
+): Promise<string[]> {
+  const missing = rels.filter((rel) => !pathExists(path.join(root, rel)));
+  if (missing.length === 0) {
+    return rels;
+  }
+  const tracked = await gitCmd(["ls-files", "-z", "--", ...missing.map(toGitPath)], trackedRoot);
+  const trackedPaths = new Set(tracked.out.split("\0").filter(Boolean));
+  return rels.filter((rel) => !missing.includes(rel) || trackedPaths.has(toGitPath(rel)));
 }
 
 /** Returns whether a file differs from HEAD in the working tree, or is untracked. */
@@ -1062,18 +1146,17 @@ async function stageAndCommit(
   }
 
   if (target.mode === "trackingWorktree") {
-    // Snapshotted files are always mirrored: the disk may already hold later
-    // (e.g. assistant) changes, or may have been reverted since the edit.
+    // Mirror every named file and let `git diff --cached` against the
+    // recording branch decide what changed. Comparing with the visible HEAD
+    // instead would miss reverts and files that exist only on the branch.
     const snapshotFor = (rel: string) =>
       snapshots?.[path.resolve(target.sourceRoot, rel)];
-    const effectiveRelFiles = Array.from(
-      new Set([
-        ...relFiles.filter((rel) => snapshotFor(rel) !== undefined),
-        ...(await changedFilesForCommit(target.sourceRoot, relFiles, addAll)),
-      ])
-    );
+    const candidates = addAll
+      ? Array.from(new Set([...relFiles, ...(await listAllChangedFiles(target.sourceRoot))]))
+      : relFiles;
+    const mirrored = await withoutIgnoredPaths(target.commitRoot, candidates);
 
-    for (const rel of effectiveRelFiles) {
+    for (const rel of mirrored) {
       copySnapshotIntoCommitTarget(
         target.sourceRoot,
         target.commitRoot,
@@ -1081,6 +1164,7 @@ async function stageAndCommit(
         snapshotFor(rel)
       );
     }
+    const effectiveRelFiles = await withoutUnknownMissingPaths(target.commitRoot, mirrored);
 
     if (effectiveRelFiles.length > 0) {
       const addRes = await gitCmd(
@@ -1149,6 +1233,7 @@ async function stageAndCommit(
       return { ok: false, skipped: false, ...failure };
     }
   } else {
+    relFiles = await withoutUnknownMissingPaths(repoRoot, relFiles);
     if (relFiles.length === 0) {
       if (!allowEmpty) {
         return { ok: false, skipped: true, msg: `No tracked files for ${ts}` };
@@ -1223,17 +1308,37 @@ export async function commitTrackedWindow(
     )
   );
 
-  const msg = formatWindowCommitMessage(commit, repoRoot);
-  const ts = new Date(commit.endedAt).toISOString();
   const snapshots = commit.kind === "human" ? commit.snapshots : undefined;
+  const hasSnapshot = (rel: string) => snapshots?.[path.resolve(repoRoot, rel)] !== undefined;
+  // Ignored files (e.g. `.env`) are never recorded; staging them would also
+  // fail the whole commit. Transient files (created and removed again within
+  // the window) are left out too, unless an editor snapshot holds their text.
+  const notIgnored = await withoutIgnoredPaths(commitTarget.commitRoot, relFiles);
+  const present = new Set(
+    await withoutUnknownMissingPaths(repoRoot, notIgnored, commitTarget.commitRoot)
+  );
+  const stageableFiles = notIgnored.filter((rel) => present.has(rel) || hasSnapshot(rel));
+
+  // The commit metadata lists only what is actually recorded.
+  const recorded = new Set(stageableFiles.map((rel) => path.resolve(repoRoot, rel)));
+  const isRecorded = (filePath: string) => recorded.has(path.resolve(filePath));
+  const recordedCommit: WindowCommit = commit.kind === "assistant"
+    ? {
+      ...commit,
+      files: commit.files.filter(isRecorded),
+      fileAttributions: commit.fileAttributions.filter((attribution) => isRecorded(attribution.path)),
+    }
+    : { ...commit, files: commit.files.filter(isRecorded) };
+  const msg = formatWindowCommitMessage(recordedCommit, repoRoot);
+  const ts = new Date(commit.endedAt).toISOString();
   if (snapshots && !dryRun && !addAll && commitTarget.mode === "currentBranch") {
-    return commitWithSnapshots(repoRoot, msg, relFiles, snapshots);
+    return commitWithSnapshots(repoRoot, msg, stageableFiles, snapshots);
   }
   return stageAndCommit(
     repoRoot,
     msg,
     ts,
-    relFiles,
+    stageableFiles,
     addAll,
     allowEmpty,
     dryRun,
@@ -1274,6 +1379,9 @@ async function commitWithSnapshots(
       const gitPath = rel.split(path.sep).join("/");
       const snapshot = snapshots[path.resolve(repoRoot, rel)];
       if (snapshot === undefined) {
+        if ((await withoutUnknownMissingPaths(repoRoot, [rel])).length === 0) {
+          continue;
+        }
         const addRes = await gitCmd(["add", "--", rel], repoRoot, { env });
         if (addRes.code !== 0) {
           return fail(addRes, "add", `Failed to stage ${rel}.`);

@@ -254,6 +254,10 @@ export async function configureClaudeHooks(): Promise<void> {
 
     await ensureGitExcludeEntries(repoRoot, scope, hookLogPath);
 
+    // Switching the integration writes workspace settings. If that creates
+    // `.vscode/settings.json`, keep it out of the participant's git status.
+    const workspaceSettingsPath = path.join(repoRoot, ".vscode", "settings.json");
+    const hadWorkspaceSettings = fs.existsSync(workspaceSettingsPath);
     const cfg = vscode.workspace.getConfiguration("flightRecorder");
     await cfg.update(
       "activeIntegration",
@@ -270,6 +274,13 @@ export async function configureClaudeHooks(): Promise<void> {
       "wait",
       vscode.ConfigurationTarget.Workspace
     );
+    if (!hadWorkspaceSettings && fs.existsSync(workspaceSettingsPath)) {
+      const gitTopLevel = await getGitTopLevel(repoRoot);
+      ensureLineInFile(
+        path.join(gitTopLevel, ".git", "info", "exclude"),
+        path.relative(gitTopLevel, workspaceSettingsPath).split(path.sep).join("/")
+      );
+    }
 
     await showPostConfigurationGuidance();
   } catch (error) {

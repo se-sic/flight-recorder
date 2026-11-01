@@ -19,7 +19,7 @@ The following commands can be executed from the command palette:
 - `Flight Recorder: Configure Claude Hooks` (`flightRecorder.configureClaudeHooks`)
 - `Flight Recorder: Export All Chats` (`flightRecorder.exportAllChats`)
 - `Flight Recorder: Anonymize Repository` (`flightRecorder.anonymizeRepo`)
-- `Flight Recorder: Edit History Visualization` (`flightRecorder.editHistoryVisualization`)
+- `Flight Recorder: Open Edit History Visualization` (`flightRecorder.editHistoryVisualization`)
 - `Flight Recorder: Push Recording Branch` (`flightRecorder.pushTrackingBranch`)
 - `Flight Recorder: Refresh Recording History` (`flightRecorder.refreshHistory`)
 - `Flight Recorder: Copy Recording Branch Name` (`flightRecorder.copyTrackingBranch`)
@@ -84,7 +84,7 @@ At the human-to-assistant boundary, Flight Recorder also prefers assistant owner
 
 ## Recording History Branch
 
-By default, Flight Recorder records into a hidden temporary worktree on an active branch named like `flight-recorder/active/<source-branch>/<session-id>`. This keeps the user's visible checkout and index untouched while recording is running.
+By default, Flight Recorder records into a hidden temporary worktree on an active branch named like `flight-recorder-active/<source-branch>/<session-id>`. This keeps the user's visible checkout and index untouched while recording is running.
 
 When recording stops, Flight Recorder flushes pending commits, commits the assistant log and optional chat export, fast-forwards or creates the normal branch `flight-recorder/<source-branch>`, removes the hidden worktree, and deletes the temporary active branch. If the final branch cannot be fast-forwarded safely, the temporary branch and hidden worktree are preserved for recovery instead of being force-updated.
 
@@ -98,7 +98,7 @@ If finalization could not complete, for example because the final branch is chec
   - Copilot Chat sessions (VS Code's `chatSessions` storage) → `.chat-log/copilot-chat/<YYYY-MM-DD_HHMM>_<title>.jsonl`
   - Copilot CLI agent sessions (`~/.copilot/session-state/<id>`) whose `cwd` or `git_root` is the repository → `.chat-log/copilot-cli/<YYYY-MM-DD_HHMM>_<title>/` (`events.jsonl`, `workspace.yaml`)
 - Exported files are copied as-is; absolute path replacement happens later during `Flight Recorder: Anonymize Repository`.
-- If `flightRecorder.exportChatsOnStop` is enabled, the same export is also performed automatically when recording stops and then committed in a dedicated git commit.
+- If `flightRecorder.exportChatsOnStop` is enabled, the same export is also performed automatically when recording stops and then committed in a dedicated git commit. That export only includes sessions that were active during the recording, never older ones.
 
 ## Repository Anonymization
 

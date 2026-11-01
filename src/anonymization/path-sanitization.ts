@@ -14,7 +14,8 @@ const GENERATED_LOG_PREFIXES = [LOG_EXPORT_PATH, CHAT_EXPORT_PATH] as const;
 const ABSOLUTE_PATH_REGEX_PATTERNS = {
   quotedPosix: String.raw`(["'\`])(/[^"'\`\r\n]+)\1`,
   quotedWindows: String.raw`(["'\`])([A-Za-z]:[\\/][^"'\`\r\n]+)\1`,
-  posix: String.raw`(^|[\s:="'` + "`" + String.raw`(\[{<])(/(?:[^\s:="'` + "`" + String.raw`<>]|\\ )+)`,
+  // `(?!/)` keeps URLs (`https://...`) and `//` comments from looking like paths.
+  posix: String.raw`(^|[\s:="'` + "`" + String.raw`(\[{])(/(?!/)(?:[^\s:="'` + "`" + String.raw`<>]|\\ )+)`,
   windows: String.raw`(^|[\s:="'` + "`" + String.raw`(\[{<])([A-Za-z]:[\\/](?:[^\s:="'` + "`" + String.raw`<>]|\\ )+)`,
   fileUri: String.raw`file:///(?:[A-Za-z]:/|/)?[^\s"'<>]+`,
 } as const;
@@ -35,124 +36,20 @@ function regexReplaceTextLine(search: string, replacement: string): string {
   return `regex:${search}==>${replacement}`;
 }
 
-/** Renders a string as a Python bytes-literal source expression. */
-function pythonBytesLiteral(value: string): string {
-  return `b${JSON.stringify(value)}`;
-}
-
-/** Returns whether a character (or end-of-string) may precede a path start. */
-function isPathBoundary(char: string | undefined): boolean {
-  return (
-    char === undefined ||
-    /\s/.test(char) ||
-    [":", "=", "`", `"`, "'", "(", ")", "[", "]", "{", "}", "<", ">", ","].includes(char)
-  );
-}
-
-/** Splits off trailing punctuation (e.g. a sentence-ending period) from a matched path candidate. */
-function trimTrailingPunctuation(value: string): { core: string; trailing: string } {
-  const match = value.match(/^(.*?)([.,;:!?)}\]]*)$/);
-  if (!match) {
-    return { core: value, trailing: "" };
-  }
-  return { core: match[1], trailing: match[2] };
-}
-
-/** Replaces `file://` URIs in text with a placeholder. */
-function replaceFileUris(text: string): string {
-  return text.replace(
-    new RegExp(ABSOLUTE_PATH_REGEX_PATTERNS.fileUri, "g"),
-    FILE_URI_PLACEHOLDER
-  );
-}
-
-/** Replaces quoted POSIX and Windows absolute paths in text with a placeholder. */
-function replaceQuotedAbsolutePaths(text: string): string {
-  return text
-    .replace(
-      new RegExp(ABSOLUTE_PATH_REGEX_PATTERNS.quotedPosix, "g"),
-      `$1${PATH_PLACEHOLDER}$1`
-    )
-    .replace(
-      new RegExp(ABSOLUTE_PATH_REGEX_PATTERNS.quotedWindows, "g"),
-      `$1${PATH_PLACEHOLDER}$1`
-    );
-}
-
-/** Replaces unquoted Windows absolute paths (e.g. `C:\...`) in text with a placeholder. */
-function replaceWindowsAbsolutePaths(text: string): string {
-  return text.replace(
-    new RegExp(ABSOLUTE_PATH_REGEX_PATTERNS.windows, "g"),
-    (match, prefix: string, candidate: string) => {
-      const { core, trailing } = trimTrailingPunctuation(candidate);
-      if (!core) {
-        return match;
-      }
-      return `${prefix}${PATH_PLACEHOLDER}${trailing}`;
-    }
-  );
-}
-
 /**
- * Replaces unquoted POSIX absolute paths (e.g. `/home/...`) in text with a
- * placeholder. Scans character-by-character rather than with a single regex
- * because path boundaries depend on the preceding character.
+ * Renders a string as a Python bytes-literal source expression. Python
+ * bytes literals only allow ASCII, so everything else (including quotes and
+ * backslashes) is written as `\xNN` escapes of its UTF-8 bytes.
  */
-function replacePosixAbsolutePaths(text: string): string {
-  let out = "";
-
-  for (let i = 0; i < text.length; i += 1) {
-    const char = text[i];
-    const prev = i > 0 ? text[i - 1] : undefined;
-    if (char !== "/" || !isPathBoundary(prev)) {
-      out += char;
-      continue;
-    }
-
-    let j = i;
-    while (j < text.length) {
-      const current = text[j];
-      if (
-        /\s/.test(current) ||
-        current === `"` ||
-        current === "'" ||
-        current === "<" ||
-        current === ">"
-      ) {
-        break;
-      }
-      j += 1;
-    }
-
-    const candidate = text.slice(i, j);
-    const { core, trailing } = trimTrailingPunctuation(candidate);
-    if (core.length <= 1) {
-      out += char;
-      continue;
-    }
-
-    out += `${PATH_PLACEHOLDER}${trailing}`;
-    i = j - 1;
+function pythonBytesLiteral(value: string): string {
+  let literal = "";
+  for (const byte of Buffer.from(value, "utf8")) {
+    const char = String.fromCharCode(byte);
+    literal += byte >= 0x20 && byte < 0x7f && char !== "\"" && char !== "\\"
+      ? char
+      : `\\x${byte.toString(16).padStart(2, "0")}`;
   }
-
-  return out;
-}
-
-/** Replaces Copilot log lines that reveal a signed-in username/account label with a placeholder. */
-function replaceCopilotUserIdentifiers(text: string): string {
-  return text
-    .replace(
-      new RegExp(COPILOT_USER_REGEX_PATTERNS.loggedInAs, "g"),
-      `$1${COPILOT_USER_PLACEHOLDER}`
-    )
-    .replace(
-      new RegExp(COPILOT_USER_REGEX_PATTERNS.gotTokenFor, "g"),
-      `$1${COPILOT_USER_PLACEHOLDER}`
-    )
-    .replace(
-      new RegExp(COPILOT_USER_REGEX_PATTERNS.accountLabel, "g"),
-      `$1${COPILOT_USER_PLACEHOLDER}$3`
-    );
+  return `b"${literal}"`;
 }
 
 /**
@@ -187,7 +84,7 @@ function repoRootReplacementExpressions(repoRoot: string): string[] {
 
 /**
  * Same textual variants as {@link repoRootReplacementExpressions}, but as
- * plain (search, replacement) string pairs for direct in-memory substitution,
+ * plain (search, replacement) string pairs for the generated-log callback,
  * sorted longest-first so nested prefixes are replaced correctly.
  */
 function repoRootReplacementPairs(repoRoot: string): Array<[string, string]> {
@@ -208,15 +105,6 @@ function repoRootReplacementPairs(repoRoot: string): Array<[string, string]> {
   ];
 
   return pairs.sort((a, b) => b[0].length - a[0].length);
-}
-
-/** Replaces every textual occurrence of the repository root path in `text` with a placeholder. */
-function replaceRepoRootPrefixes(text: string, repoRoot: string): string {
-  let result = text;
-  for (const [pattern, replacement] of repoRootReplacementPairs(repoRoot)) {
-    result = result.split(pattern).join(replacement);
-  }
-  return result;
 }
 
 /**
@@ -247,24 +135,6 @@ function allAbsolutePathReplacementExpressions(): string[] {
       FILE_URI_PLACEHOLDER
     ),
   ];
-}
-
-/** Replaces every recognized absolute path form (quoted, Windows, POSIX, file URI) in text with a placeholder. */
-export function sanitizeAbsolutePaths(text: string): string {
-  return replacePosixAbsolutePaths(
-    replaceWindowsAbsolutePaths(replaceQuotedAbsolutePaths(replaceFileUris(text)))
-  );
-}
-
-/**
- * Applies the full in-memory sanitization pipeline used for generated
- * recorder artifacts (`.log`/`.chat-log` content): repo-root scrubbing,
- * absolute-path scrubbing, and Copilot username scrubbing.
- */
-export function sanitizeGeneratedLogContent(text: string, repoRoot: string): string {
-  return replaceCopilotUserIdentifiers(
-    sanitizeAbsolutePaths(replaceRepoRootPrefixes(text, repoRoot))
-  );
 }
 
 /**

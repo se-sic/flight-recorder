@@ -1,3 +1,4 @@
+import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
 import { exportCurrentWorkspaceChats } from "./chat-export";
@@ -8,6 +9,7 @@ import {
   GitActionResult,
   GitFailureKind,
   finalizePendingTrackingSession,
+  discardRecordingCommitTarget,
   finalizeRecordingCommitTarget,
   listPendingTrackingSessions,
   PendingTrackingSession,
@@ -58,6 +60,8 @@ type RecordingSession = {
   dryRun: boolean;
   commitTarget: RecordingCommitTarget;
   shownFailureKinds: Set<GitFailureKind>;
+  /** When recording started; chat export on stop only includes sessions used since then. */
+  startedAt: Date;
 };
 
 export type RecordingBranchUiState = {
@@ -79,8 +83,10 @@ let recordingStatusBarItem: vscode.StatusBarItem | null = null;
 let extensionContextRef: vscode.ExtensionContext | null = null;
 let claudeNewSessionHintShown = false;
 let recovering = false;
+let starting = false;
+let startingActiveBranch: string | null = null;
 let lastRecordingBranchState: RecordingBranchUiState | null = null;
-const LAST_RECORDING_BRANCH_STATE_KEY = "flightRecorder.lastRecordingBranchState";
+export const LAST_RECORDING_BRANCH_STATE_KEY = "flightRecorder.lastRecordingBranchState";
 const recordingHistoryChangedEmitter = new vscode.EventEmitter<void>();
 
 export const onRecordingHistoryChanged = recordingHistoryChangedEmitter.event;
@@ -301,6 +307,57 @@ async function processAssistantEvent(
   return false;
 }
 
+/**
+ * Watches the repository for on-disk changes that VS Code reports no document
+ * events for, such as files changed by a shell command, and feeds them into
+ * the staging tracker. Paths inside `.git`, created directories (their files
+ * are reported individually) and files last changed before the recording
+ * started are skipped; deleted directories are kept so their removal is
+ * committed.
+ */
+function watchDiskChanges(session: RecordingSession): vscode.Disposable[] {
+  const watcher = vscode.workspace.createFileSystemWatcher(
+    new vscode.RelativePattern(session.repoRoot, "**/*")
+  );
+  const track = (uri: vscode.Uri, deleted: boolean) => {
+    const filePath = normalizeFileUri(uri);
+    if (!filePath) {
+      return;
+    }
+    const rel = path.relative(session.repoRoot, filePath);
+    if (rel.startsWith("..") || rel.split(path.sep).includes(".git")) {
+      return;
+    }
+    if (!deleted) {
+      try {
+        const stat = fs.statSync(filePath);
+        // Directories are reported file by file. Events that arrive late for
+        // changes made before recording started are not part of the session
+        // (ctime also covers renames, which keep mtime).
+        if (
+          stat.isDirectory() ||
+          Math.max(stat.mtimeMs, stat.ctimeMs) < session.startedAt.getTime()
+        ) {
+          return;
+        }
+      } catch {
+        return;
+      }
+    }
+    const paths = filterInternalTrackingPaths(session, [filePath]);
+    if (paths.length > 0) {
+      session.tracker.recordDiskChange(paths);
+    }
+  };
+
+  return [
+    watcher,
+    watcher.onDidCreate((uri) => track(uri, false)),
+    watcher.onDidChange((uri) => track(uri, false)),
+    watcher.onDidDelete((uri) => track(uri, true)),
+  ];
+}
+
 /** Registers VS Code workspace listeners (document edits, file create/delete/rename) that feed human changes into the staging tracker. */
 function registerWorkspaceChangeTracking(
   session: RecordingSession
@@ -369,6 +426,7 @@ function registerWorkspaceChangeTracking(
       });
       trackPaths(renamePaths);
     }),
+    ...watchDiskChanges(session),
   ];
 }
 
@@ -414,6 +472,8 @@ function gitFailureUiMessage(kind: GitFailureKind, fallback: string): string {
       return `${EXTENSION_NAME} could not find Git. Install Git and make sure it is available in PATH.`;
     case "not_a_repo":
       return `${EXTENSION_NAME} requires the opened folder to be a git repository.`;
+    case "no_commits":
+      return `${EXTENSION_NAME} needs at least one commit in this repository. Create a first commit, then start recording.`;
     case "identity_not_configured":
       return `${EXTENSION_NAME} could not create a commit because Git user.name or user.email is not configured.`;
     case "add_failed":
@@ -564,7 +624,7 @@ async function maybeShowClaudeNewSessionHint(
   }
 
   claudeNewSessionHintShown = true;
-  await vscode.window.showInformationMessage(
+  void vscode.window.showInformationMessage(
     "Claude hook recording is active. If Claude chat was already open before hook setup, start a new Claude chat/session in this repository so the current session picks up the hook state."
   );
 }
@@ -578,10 +638,23 @@ async function maybeShowClaudeNewSessionHint(
 export async function startRecording(
   context: vscode.ExtensionContext
 ): Promise<boolean> {
-  if (running || recovering) {
+  if (running || recovering || starting) {
     return false;
   }
 
+  starting = true;
+  try {
+    return await startRecordingUnguarded(context);
+  } finally {
+    starting = false;
+    startingActiveBranch = null;
+  }
+}
+
+/** Performs the actual start; callers must hold the `starting` guard. */
+async function startRecordingUnguarded(
+  context: vscode.ExtensionContext
+): Promise<boolean> {
   extensionContextRef = context;
   const output = getLogChannel();
   const integration = await resolveIntegrationForStart();
@@ -627,6 +700,7 @@ export async function startRecording(
     if (pending.length > 0) {
       const choice = await vscode.window.showWarningMessage(
         `${EXTENSION_NAME} found ${pending.length} earlier recording(s) that were not finalized. Recover them before starting?`,
+        { modal: true },
         "Recover Now",
         "Start Anyway"
       );
@@ -634,9 +708,20 @@ export async function startRecording(
         return false;
       }
       if (choice === "Recover Now") {
-        await recoverUnfinishedRecordings();
+        await recoverUnfinishedRecordingsUnguarded();
       }
     }
+  }
+
+  // Prepare the integration first so a failure here leaves no hidden worktree behind.
+  const prepared = await integration.prepareRecording(context, repoRoot);
+  if (prepared.ok === false) {
+    output.error(`${prepared.msg}\n${prepared.err ?? ""}`);
+    await maybeRunIntegrationSetupAction(prepared.setupAction);
+    vscode.window.showErrorMessage(
+      `${EXTENSION_NAME} could not prepare ${integration.displayName} recording. ${prepared.msg}`
+    );
+    return false;
   }
 
   const commitTargetResult = await prepareRecordingCommitTarget(
@@ -656,22 +741,13 @@ export async function startRecording(
   }
   const commitTarget = commitTargetResult.target;
   if (commitTarget.mode === "trackingWorktree") {
+    startingActiveBranch = commitTarget.activeBranchName;
     output.info(
       `Using Flight Recorder active branch ${commitTarget.activeBranchName} at ${commitTarget.commitRoot}`
     );
     output.info(
       `Recording will finalize to ${commitTarget.finalBranchName} when stopped.`
     );
-  }
-
-  const prepared = await integration.prepareRecording(context, repoRoot);
-  if (prepared.ok === false) {
-    output.error(`${prepared.msg}\n${prepared.err ?? ""}`);
-    await maybeRunIntegrationSetupAction(prepared.setupAction);
-    vscode.window.showErrorMessage(
-      `${EXTENSION_NAME} could not prepare ${integration.displayName} recording. ${prepared.msg}`
-    );
-    return false;
   }
 
   output.info(`Repo: ${repoRoot}`);
@@ -759,11 +835,13 @@ export async function startRecording(
     dryRun,
     commitTarget,
     shownFailureKinds: new Set<GitFailureKind>(),
+    startedAt: new Date(),
   };
   if (prepared.ok === true && session) {
     const attached = attachLogSource(session, prepared.logFile, prepared.parser);
     if (!attached) {
       clearInterval(interval);
+      await discardRecordingCommitTarget(commitTarget, dryRun);
       return false;
     }
   }
@@ -861,13 +939,16 @@ export async function stopRecording(): Promise<boolean> {
         const chatExport = await exportCurrentWorkspaceChats(
           extensionContextRef,
           current.repoRoot,
-          current.commitTarget.commitRoot
+          current.commitTarget.commitRoot,
+          current.startedAt
         );
         if (!chatExport.ok) {
           output.error(chatExport.msg);
           void vscode.window.showErrorMessage(
             `${EXTENSION_NAME} could not export chats during shutdown. ${chatExport.msg}`
           );
+        } else if (chatExport.count === 0) {
+          output.info("No chat sessions were active during this recording; skipping the chat export commit.");
         } else {
           output.info(
             `Exported ${chatExport.count} session file(s) to ${chatExport.destDir}`
@@ -944,7 +1025,9 @@ export async function listUnfinishedRecordings(): Promise<PendingTrackingSession
     getTrackingBranchPrefix()
   );
   return pending.filter(
-    (session) => session.activeBranchName !== runningActiveBranch
+    (session) =>
+      session.activeBranchName !== runningActiveBranch &&
+      session.activeBranchName !== startingActiveBranch
   );
 }
 
@@ -984,6 +1067,17 @@ async function recoverUnfinishedRecording(
  * that closed while recording) and releases their hidden worktrees.
  */
 export async function recoverUnfinishedRecordings(): Promise<void> {
+  if (starting) {
+    void vscode.window.showInformationMessage(
+      `${EXTENSION_NAME} is starting a recording; try recovering again afterwards.`
+    );
+    return;
+  }
+  await recoverUnfinishedRecordingsUnguarded();
+}
+
+/** Recovers unfinished recordings; also used by start's "Recover Now" while `starting` is set. */
+async function recoverUnfinishedRecordingsUnguarded(): Promise<void> {
   if (running || stopping || recovering) {
     void vscode.window.showInformationMessage(
       `Stop the current ${EXTENSION_NAME} recording before recovering unfinished recordings.`

@@ -6,6 +6,8 @@ export type AssistantCapability =
   | "tool-call"
   | "chat"
   | "command"
+  /** Reads, searches and other activity that never changes files. */
+  | "read-only"
   | "unknown";
 
 export type AssistantEventKind =
@@ -63,6 +65,13 @@ export type AssistantEvent = {
   cursorPosition?: CursorPosition;
   origin?: EditOrigin;
   evidence?: AttributionEvidence[];
+  /**
+   * Marks the start or end of a tool run that may change any file (e.g. a
+   * shell command). While one is running, the assistant window stays open
+   * and claims every workspace change. A `finished` event without `id`
+   * means all running tools are done (e.g. the assistant's turn ended).
+   */
+  toolCall?: { id?: string; phase: "started" | "finished" };
   metadata?: Record<string, unknown>;
 };
 
