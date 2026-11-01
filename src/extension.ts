@@ -6,7 +6,11 @@ import {
 } from "./visualization/controller";
 import {
   exportAllChats,
+  getRecordingBranchState,
   initializeRecordingContext,
+  LAST_RECORDING_BRANCH_STATE_KEY,
+  listUnfinishedRecordings,
+  RecordingBranchUiState,
   initializeRecordingStatusBar,
   isRecording,
   restoreRecordingBranchState,
@@ -20,8 +24,16 @@ import { configureClaudeHooks } from "./recording/agents/claude/hooks";
 import { COMMAND_STATUS, EXTENSION_NAME } from "./utils/constants";
 import { initializeLogChannel } from "./utils/logging";
 
+/** Read-only state returned from `activate`, used by the end-to-end tests. */
+export type FlightRecorderApi = {
+  isRecording: () => boolean;
+  getRecordingBranchState: () => RecordingBranchUiState | null;
+  getPersistedRecordingBranchState: () => RecordingBranchUiState | undefined;
+  listUnfinishedRecordings: typeof listUnfinishedRecordings;
+};
+
 /** Extension activation entry point: sets up logging, the recording status bar item, and registers all commands. */
-export function activate(context: vscode.ExtensionContext) {
+export function activate(context: vscode.ExtensionContext): FlightRecorderApi {
   // Initialize global logging channel
   const outputChannel = initializeLogChannel(EXTENSION_NAME);
   context.subscriptions.push(outputChannel);
@@ -111,6 +123,14 @@ export function activate(context: vscode.ExtensionContext) {
     anonymizeRepoCmd,
     editHistoryVisualizationCmd
   );
+
+  return {
+    isRecording,
+    getRecordingBranchState,
+    getPersistedRecordingBranchState: () =>
+      context.workspaceState.get<RecordingBranchUiState>(LAST_RECORDING_BRANCH_STATE_KEY),
+    listUnfinishedRecordings,
+  };
 }
 
 /** Extension deactivation entry point: tears down the edit history visualization and stops any active recording. */
