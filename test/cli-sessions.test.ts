@@ -5,6 +5,7 @@ import * as path from "node:path";
 import test from "node:test";
 import {
   CopilotCliEventParser,
+  copilotCliSessionsActiveSince,
   CopilotCliSessionWatcher,
   findCopilotCliSessionsForRepo,
   parseCopilotCliWorkspace,
@@ -150,4 +151,26 @@ test("findCopilotCliSessionsForRepo returns empty list for missing state dir", a
     path.join(os.tmpdir(), "fr-cli-sessions-missing-dir")
   );
   assert.deepEqual(found, []);
+});
+
+test("copilotCliSessionsActiveSince keeps only sessions with files changed since the given time", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "fr-cli-active-"));
+  const makeSession = (name: string, mtime: Date) => {
+    const dir = path.join(root, name);
+    fs.mkdirSync(dir);
+    for (const file of ["events.jsonl", "workspace.yaml"]) {
+      fs.writeFileSync(path.join(dir, file), "x\n");
+      fs.utimesSync(path.join(dir, file), mtime, mtime);
+    }
+    return { dir, workspace: { dirs: [root] } };
+  };
+  const recordingStart = new Date("2026-11-04T12:00:00Z");
+  const old = makeSession("old", new Date("2026-10-08T12:00:00Z"));
+  const current = makeSession("current", new Date("2026-11-04T12:30:00Z"));
+  fs.utimesSync(path.join(current.dir, "workspace.yaml"), new Date("2026-10-01"), new Date("2026-10-01"));
+
+  const active = await copilotCliSessionsActiveSince([old, current], recordingStart);
+
+  assert.deepEqual(active.map((session) => path.basename(session.dir)), ["current"]);
+  fs.rmSync(root, { recursive: true, force: true });
 });

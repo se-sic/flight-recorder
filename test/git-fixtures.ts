@@ -41,3 +41,10 @@ export function listBranches(repo: string): string[] {
     .filter(Boolean)
     .sort();
 }
+
+/** Creates a bare repository to use as a push remote. */
+export function makeBareRemote(): string {
+  const dir = makeTempDir("fr-test-remote-");
+  git(dir, "init", "-q", "--bare");
+  return dir;
+}

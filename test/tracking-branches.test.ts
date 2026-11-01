@@ -4,6 +4,7 @@ import * as path from "node:path";
 import test from "node:test";
 import {
   commitTrackedWindow,
+  discardRecordingCommitTarget,
   finalizePendingTrackingSession,
   finalizeRecordingCommitTarget,
   listPendingTrackingSessions,
@@ -56,7 +57,7 @@ test("tracking worktree commits leave the visible branch and index untouched", a
   const mainHead = git(repo, "rev-parse", "HEAD");
   const target = await startSession(repo);
 
-  assert.match(target.activeBranchName, /^flight-recorder\/active\/main\/.+/);
+  assert.match(target.activeBranchName, /^flight-recorder-active\/main\/.+/);
   assert.equal(target.finalBranchName, "flight-recorder/main");
   assert.ok(fs.existsSync(target.commitRoot));
 
@@ -100,6 +101,17 @@ test("tracking worktree human commits use editor snapshots instead of the disk c
   assert.equal(git(repo, "show", `${target.activeBranchName}:README.md`), "human line");
   assert.equal(fs.readFileSync(filePath, "utf8"), "human line\nassistant completion\n");
   assert.equal(git(repo, "status", "--porcelain"), "M README.md");
+});
+
+test("discarding an unused session removes its worktree and active branch", async () => {
+  const repo = makeRepo();
+  const target = await startSession(repo);
+
+  await discardRecordingCommitTarget(target, false);
+
+  assert.equal(fs.existsSync(target.commitRoot), false);
+  assert.deepEqual(listBranches(repo), ["main"]);
+  assert.deepEqual(await listPendingTrackingSessions(repo, PREFIX), []);
 });
 
 test("finalization creates the final branch and releases the worktree and active branch", async () => {
@@ -318,9 +330,9 @@ test("dry runs and current-branch mode do not touch git", async () => {
 test("listPendingTrackingSessions ignores unrelated and malformed branches", async () => {
   const repo = makeRepo();
   git(repo, "branch", "flight-recorder/main");
-  git(repo, "branch", "flight-recorder/active/missing-session");
-  git(repo, "branch", "other/active/main/123");
-  git(repo, "branch", "flight-recorder/active/feature-x/2026-01-01T00-00-00-000Z-abc123");
+  git(repo, "branch", "flight-recorder-active/missing-session");
+  git(repo, "branch", "other-active/main/123");
+  git(repo, "branch", "flight-recorder-active/feature-x/2026-01-01T00-00-00-000Z-abc123");
 
   const pending = await listPendingTrackingSessions(repo, PREFIX);
 
@@ -338,4 +350,22 @@ test("listPendingTrackingSessions ignores unrelated and malformed branches", asy
       },
     ]
   );
+});
+
+test("active branches from the older flight-recorder/active/ namespace are still recovered", async () => {
+  const repo = makeRepo();
+  const legacy = "flight-recorder/active/main/2026-01-01T00-00-00-000Z-old123";
+  git(repo, "branch", legacy);
+  git(repo, "checkout", "-q", legacy);
+  const head = commitEmpty(repo, "Flight Recorder: human edits (0 files)");
+  git(repo, "checkout", "-q", "main");
+
+  const [pending] = await listPendingTrackingSessions(repo, PREFIX);
+  assert.equal(pending.activeBranchName, legacy);
+  assert.equal(pending.finalBranchName, "flight-recorder/main");
+  const res = await finalizePendingTrackingSession(pending, "preserve");
+
+  assert.equal(res.ok, true, res.msg);
+  assert.equal(git(repo, "rev-parse", "flight-recorder/main"), head);
+  assert.deepEqual(listBranches(repo), ["flight-recorder/main", "main"]);
 });

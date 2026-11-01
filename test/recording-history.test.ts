@@ -6,16 +6,9 @@ import {
   resolvePushRemote,
 } from "../src/history-panel/history";
 import { formatWindowCommitMessage } from "../src/recording/staging-tracker";
-import { commitEmpty, git, makeRepo, makeTempDir } from "./git-fixtures";
+import { commitEmpty, git, makeBareRemote, makeRepo, makeTempDir } from "./git-fixtures";
 
 const BRANCH = "flight-recorder/main";
-
-/** Creates a bare repository to use as a push remote. */
-function makeBareRemote(): string {
-  const dir = makeTempDir("fr-test-remote-");
-  git(dir, "init", "-q", "--bare");
-  return dir;
-}
 
 test("readRecordingHistory parses every recording commit kind, newest first", async () => {
   const repo = makeRepo();
@@ -68,6 +61,24 @@ test("readRecordingHistory parses every recording commit kind, newest first", as
   assert.equal(legacy.subject, "legacy commit without metadata");
   assert.deepEqual(legacy.files, []);
   assert.equal(history.upstream, null);
+});
+
+test("readRecordingHistory hides the source branch history the recording started from", async () => {
+  const repo = makeRepo();
+  commitEmpty(repo, "older project commit");
+  git(repo, "checkout", "-q", "-b", BRANCH);
+  commitEmpty(repo, "Flight Recorder: human edits (0 files)");
+  git(repo, "checkout", "-q", "main");
+  commitEmpty(repo, "newer project commit");
+
+  const history = await readRecordingHistory(repo, BRANCH, "main");
+
+  assert.deepEqual(
+    history?.entries.map((entry) => entry.subject),
+    ["Flight Recorder: human edits (0 files)"]
+  );
+  const unfiltered = await readRecordingHistory(repo, BRANCH, "missing-branch");
+  assert.equal(unfiltered?.entries.length, 3);
 });
 
 test("readRecordingHistory returns null for a missing branch", async () => {
@@ -125,4 +136,46 @@ test("pushRecordingBranch reports a missing branch without pushing", async () =>
 
   assert.equal(res.ok, false);
   assert.equal(git(remote, "for-each-ref", "--format=%(refname)"), "");
+});
+
+test("a recording branch behind its remote is reported as behind and never force-pushed", async () => {
+  const repo = makeRepo();
+  const remote = makeBareRemote();
+  git(repo, "remote", "add", "origin", remote);
+  git(repo, "branch", BRANCH);
+  await pushRecordingBranch(repo, BRANCH, "origin");
+  const other = makeTempDir("fr-test-clone-");
+  git(other, "clone", "-q", "-b", BRANCH, remote, ".");
+  git(other, "config", "user.name", "Other");
+  git(other, "config", "user.email", "other@example.com");
+  commitEmpty(other, "pushed from elsewhere");
+  git(other, "push", "-q", "origin", BRANCH);
+  git(repo, "fetch", "-q", "origin");
+
+  const history = await readRecordingHistory(repo, BRANCH);
+
+  assert.deepEqual([history?.ahead, history?.behind], [0, 1]);
+  const remoteHead = git(remote, "rev-parse", BRANCH);
+  const push = await pushRecordingBranch(repo, BRANCH, "origin");
+  assert.equal(push.ok, false);
+  assert.match(push.msg, /newer commits|behind|pull|fetch/i);
+  assert.equal(git(remote, "rev-parse", BRANCH), remoteHead);
+});
+
+test("readRecordingHistory treats a deleted upstream as no upstream", async () => {
+  const repo = makeRepo();
+  const remote = makeBareRemote();
+  git(repo, "remote", "add", "origin", remote);
+  git(repo, "branch", BRANCH);
+  await pushRecordingBranch(repo, BRANCH, "origin");
+  git(remote, "branch", "-D", BRANCH);
+  git(repo, "fetch", "-q", "--prune", "origin");
+
+  const history = await readRecordingHistory(repo, BRANCH);
+
+  assert.equal(history?.upstream, null);
+  assert.deepEqual([history?.ahead, history?.behind], [null, null]);
+  assert.deepEqual(await resolvePushRemote(repo, BRANCH), { remote: "origin" });
+  const push = await pushRecordingBranch(repo, BRANCH, "origin");
+  assert.equal(push.ok, true, push.msg);
 });

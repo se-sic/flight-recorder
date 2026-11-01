@@ -250,3 +250,72 @@ test("ClaudeCodeParser ignores rejected transcript file-edit tool results", () =
 
   assert.equal(events.length, 0);
 });
+
+test("ClaudeCodeParser labels file edits from Claude's tools as assistant tool edits", () => {
+  const parser = new ClaudeCodeParser();
+  const events = Array.from(
+    parser.feed(
+      `${JSON.stringify({
+        session_id: "session-1",
+        cwd: "/Users/test/demo",
+        hook_event_name: "PostToolUse",
+        tool_name: "Edit",
+        tool_input: { file_path: "/Users/test/demo/src/app.ts", old_string: "a", new_string: "b" },
+        tool_response: { filePath: "/Users/test/demo/src/app.ts", success: true },
+      })}\n`
+    )
+  );
+
+  const edit = events.find((event) => event.kind === "edit-applied");
+  assert.ok(edit);
+  assert.equal(edit.origin, "assistant-tool-edit");
+});
+
+/** Feeds hook payloads (one JSON line each) to a fresh parser. */
+function parseHooks(...payloads: Array<Record<string, unknown>>) {
+  const parser = new ClaudeCodeParser();
+  return Array.from(
+    parser.feed(payloads.map((payload) => `${JSON.stringify({ session_id: "s", cwd: "/Users/test/demo", ...payload })}\n`).join(""))
+  );
+}
+
+test("ClaudeCodeParser marks read-only tools so they never claim files", () => {
+  const events = parseHooks(
+    { hook_event_name: "PreToolUse", tool_name: "Read", tool_input: { file_path: "/Users/test/demo/src/app.ts" } },
+    { hook_event_name: "PostToolUse", tool_name: "Grep", tool_input: { pattern: "x", path: "/Users/test/demo/src" } }
+  );
+
+  assert.deepEqual(events.map((event) => event.capability), ["read-only", "read-only"]);
+  assert.equal(events.some((event) => event.toolCall), false);
+});
+
+test("ClaudeCodeParser reports start and end of shell commands by tool_use_id", () => {
+  const events = parseHooks(
+    { hook_event_name: "PreToolUse", tool_name: "Bash", tool_use_id: "t1", tool_input: { command: "mv a b" } },
+    { hook_event_name: "PostToolUseFailure", tool_name: "Bash", tool_use_id: "t1", tool_input: { command: "mv a b" } },
+    { hook_event_name: "PreToolUse", tool_name: "mcp__fs__write", tool_use_id: "t2", tool_input: {} }
+  );
+
+  assert.deepEqual(events.map((event) => event.toolCall), [
+    { id: "t1", phase: "started" },
+    { id: "t1", phase: "finished" },
+    { id: "t2", phase: "started" },
+  ]);
+  assert.equal(events[0].capability, "command");
+});
+
+test("ClaudeCodeParser treats Stop and UserPromptSubmit as the end of all running tools", () => {
+  const events = parseHooks(
+    { hook_event_name: "UserPromptSubmit", prompt: "hi" },
+    { hook_event_name: "Stop" },
+    { hook_event_name: "SessionStart" }
+  );
+
+  assert.deepEqual(
+    events.map((event) => [event.capability, event.toolCall]),
+    [
+      ["read-only", { phase: "finished" }],
+      ["read-only", { phase: "finished" }],
+    ]
+  );
+});
