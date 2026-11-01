@@ -17,6 +17,7 @@ The following commands can be executed from the command palette:
 - `Flight Recorder: Start Recording` (`flightRecorder.start`)
 - `Flight Recorder: Stop Recording` (`flightRecorder.stop`)
 - `Flight Recorder: Configure Claude Hooks` (`flightRecorder.configureClaudeHooks`)
+- `Flight Recorder: Configure OpenCode Plugin` (`flightRecorder.configureOpenCodePlugin`)
 - `Flight Recorder: Export All Chats` (`flightRecorder.exportAllChats`)
 - `Flight Recorder: Anonymize Repository` (`flightRecorder.anonymizeRepo`)
 - `Flight Recorder: Open Edit History Visualization` (`flightRecorder.editHistoryVisualization`)
@@ -34,6 +35,7 @@ The following commands can be executed from the command palette:
 - Opened folder is a Git repository
 - GitHub Copilot Chat extension installed if you use the `github-copilot` integration
 - Claude Code installed and actively writing session data if you use the `claude-code` integration
+- OpenCode `2.0+` if you use the `opencode` integration
 - Debug-level GitHub Copilot Chat logging must be enabled by VS Code for the Copilot integration; the extension attempts to configure this automatically when recording starts
 - Trusted workspace for repository anonymization
 
@@ -49,7 +51,7 @@ The following commands can be executed from the command palette:
 
 Flight Recorder resolves one active assistant integration at startup through `flightRecorder.activeIntegration`.
 
-- Current built-in integrations: `github-copilot`, `claude-code`
+- Current built-in integrations: `github-copilot`, `claude-code`, `opencode`
 - Set `activeIntegration` to `askOnStartup` to be prompted for a choice each time you start recording instead of always using a fixed integration
 - The selected integration controls recording setup, primary log discovery, event parsing, and assistant-log snapshot naming.
 - The recorder core remains integration-agnostic; adding another assistant should mainly require registering another implementation of the integration contract defined in `src/recording/integration.ts`, which emits the shared event model from `src/recording/event.ts`.
@@ -59,6 +61,18 @@ Flight Recorder resolves one active assistant integration at startup through `fl
 Claude Code support is new and less battle-tested than the Copilot integration; expect rough edges.
 
 Flight Recorder can track Claude Code via structured hook payloads (preferred, set by `flightRecorder.claudeSource = hookLog`) or by parsing local transcript JSONL files under `~/.claude/projects/` (`transcript`, or override the directory with `CLAUDE_CONFIG_DIR`); `auto` prefers the hook log when present. Run `Flight Recorder: Configure Claude Hooks` for the lowest-friction setup: it registers Flight Recorder's hook script in your Claude project settings, switches this workspace to `activeIntegration = claude-code` and `claudeSource = hookLog`, and reminds you to start a fresh Claude session so it picks up the new hook config. Without hooks, the integration falls back to transcript parsing, which is less precise about concrete file operations.
+
+### OpenCode (Experimental)
+
+OpenCode support requires OpenCode 2.0 or newer; the 1.x plugin API is not supported.
+
+Run `Flight Recorder: Configure OpenCode Plugin` once per repository. It writes a small plugin to `.opencode/plugins/flight-recorder.ts`, which OpenCode loads automatically, excludes the plugin and its log from git, and switches the workspace to `activeIntegration = opencode`. The plugin appends every tool call (before and after execution, including the unified diff of each `edit`/`patch`) and the files changed per model step to `.opencode/flight-recorder-events.jsonl`, which Flight Recorder tails while recording.
+
+Known limitations:
+
+- Edits made through shell commands are only attributed at model-step granularity (from OpenCode's snapshot of changed files), with medium confidence.
+- Changes outside the repository are not visible.
+- Re-run the configure command after updating Flight Recorder; it warns when the installed plugin is outdated.
 
 ## Fine-Grained Staging
 
@@ -118,6 +132,7 @@ All settings use the `flightRecorder.*` prefix:
 - `claudeHookLogPath` (default `.claude/flight-recorder-hooks.jsonl`): for the Claude Code integration, path to the JSONL hook log file. Relative paths are resolved against the repository root.
 - `claudeConfigDir` (default empty): optional override for the Claude Code configuration directory. When empty, Flight Recorder uses `CLAUDE_CONFIG_DIR` if set, otherwise `~/.claude`.
 - `claudeMissingSourceBehavior` (default `wait`): for the Claude Code integration, choose whether Flight Recorder should wait for the first repo-specific hook log/transcript to appear or fail startup immediately when no source exists yet.
+- `openCodeMissingSourceBehavior` (default `wait`): for the OpenCode integration, choose whether Flight Recorder should wait for OpenCode to load the plugin and create its log, or fail startup immediately.
 - `addAll` (default `false`): stage all changed files before commit.
 - `allowEmpty` (default `false`): allow empty commits.
 - `dryRun` (default `false`): print actions without creating commits.

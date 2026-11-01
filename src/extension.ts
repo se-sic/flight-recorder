@@ -21,6 +21,7 @@ import {
 } from "./recording/session";
 import { initializeRecordingHistoryPanel } from "./history-panel/controller";
 import { configureClaudeHooks } from "./recording/agents/claude/hooks";
+import { configureOpenCodePlugin } from "./recording/agents/opencode/setup";
 import { COMMAND_STATUS, EXTENSION_NAME } from "./utils/constants";
 import { initializeLogChannel } from "./utils/logging";
 
@@ -100,6 +101,13 @@ export function activate(context: vscode.ExtensionContext): FlightRecorderApi {
     }
   );
 
+  const configureOpenCodePluginCmd = vscode.commands.registerCommand(
+    "flightRecorder.configureOpenCodePlugin",
+    async () => {
+      await configureOpenCodePlugin();
+    }
+  );
+
   const anonymizeRepoCmd = vscode.commands.registerCommand(
     "flightRecorder.anonymizeRepo",
     async () => {
@@ -120,6 +128,7 @@ export function activate(context: vscode.ExtensionContext): FlightRecorderApi {
     printCmd,
     exportChatsCmd,
     configureClaudeHooksCmd,
+    configureOpenCodePluginCmd,
     anonymizeRepoCmd,
     editHistoryVisualizationCmd
   );

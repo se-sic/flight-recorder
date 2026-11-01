@@ -94,6 +94,8 @@ type AssistantWindowState = {
   openEnded: boolean;
   /** Tools reported as started but not yet finished (see `AssistantEvent.toolCall`). */
   runningTools: Set<string>;
+  /** Observed text changes, kept so evidence that arrives after its change can still be matched. */
+  materializations: WorkspaceTextChange[];
 };
 
 /** Resolves paths to absolute form, dropping blanks and duplicates, and returns them sorted. */
@@ -554,6 +556,7 @@ export class FineGrainedStagingTracker {
       return;
     }
 
+    this.assistantState.materializations.push(change);
     const matchingEvents = this.assistantState.events.filter((event) =>
       normalizePaths(collectEventFilePaths(event)).includes(change.path)
     );
@@ -650,6 +653,7 @@ export class FineGrainedStagingTracker {
         awaitingMaterialization,
         openEnded: false,
         runningTools: new Set<string>(),
+        materializations: [],
       };
     }
 
@@ -664,7 +668,18 @@ export class FineGrainedStagingTracker {
     }
     for (const filePath of assistantPaths) {
       this.assistantState.files.add(filePath);
-      const next = attributionFromEvent(event, filePath);
+      let next = attributionFromEvent(event, filePath);
+      // The editor may report a change before the event carrying its evidence
+      // is parsed (e.g. a tool's post-execution log line), so match this event
+      // against changes already observed in the window as well.
+      for (const change of this.assistantState.materializations) {
+        if (change.path === filePath) {
+          next = mergeAttribution(
+            next,
+            materializationAttribution(event, filePath, change)
+          );
+        }
+      }
       const existing = this.assistantState.fileAttributions.get(filePath);
       this.assistantState.fileAttributions.set(
         filePath,

@@ -44,6 +44,10 @@
         "title": "Flight Recorder: Configure Claude Hooks"
       },
       {
+        "command": "flightRecorder.configureOpenCodePlugin",
+        "title": "Flight Recorder: Configure OpenCode Plugin"
+      },
+      {
         "command": "flightRecorder.anonymizeRepo",
         "title": "Flight Recorder: Anonymize Repository"
       },
@@ -113,11 +117,13 @@
           "enum": [
             "github-copilot",
             "claude-code",
+            "opencode",
             "askOnStartup"
           ],
           "enumDescriptions": [
             "Always record GitHub Copilot.",
             "Always record Claude Code.",
+            "Always record OpenCode (2.0 or newer).",
             "Prompt for which assistant to monitor each time recording starts."
           ],
           "default": "github-copilot",
@@ -151,6 +157,15 @@
           ],
           "default": "wait",
           "description": "Controls what happens when the Claude Code integration cannot find a repo-specific transcript or hook log yet. 'wait' starts recording and attaches once the source appears; 'fail' aborts startup immediately."
+        },
+        "flightRecorder.openCodeMissingSourceBehavior": {
+          "type": "string",
+          "enum": [
+            "wait",
+            "fail"
+          ],
+          "default": "wait",
+          "description": "Controls what happens when the OpenCode plugin is installed but OpenCode has not created its log yet. 'wait' starts recording and attaches once the log appears; 'fail' aborts startup immediately."
         },
         "flightRecorder.addAll": {
           "type": "boolean",
