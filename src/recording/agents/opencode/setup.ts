@@ -53,12 +53,19 @@ export async function configureOpenCodePlugin(): Promise<void> {
 
     await addGitExcludeEntries(repoRoot, [pluginPath, logPath]);
 
+    // Switching the integration writes workspace settings. If that creates
+    // `.vscode/settings.json`, keep it out of the participant's git status.
+    const workspaceSettingsPath = path.join(repoRoot, ".vscode", "settings.json");
+    const hadWorkspaceSettings = fs.existsSync(workspaceSettingsPath);
     const cfg = vscode.workspace.getConfiguration("flightRecorder");
     await cfg.update(
       "activeIntegration",
       "opencode",
       vscode.ConfigurationTarget.Workspace
     );
+    if (!hadWorkspaceSettings && fs.existsSync(workspaceSettingsPath)) {
+      await addGitExcludeEntries(repoRoot, [workspaceSettingsPath]);
+    }
 
     await vscode.window.showInformationMessage(
       `${EXTENSION_NAME} configured the OpenCode plugin. OpenCode picks it up automatically; if a session is already running and nothing gets recorded, restart OpenCode.`,

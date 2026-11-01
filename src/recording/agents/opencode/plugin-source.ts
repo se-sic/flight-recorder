@@ -2,7 +2,7 @@
  * Version of the JSONL record format written by the generated plugin. Bump it
  * whenever the plugin source changes so existing installs are flagged as stale.
  */
-export const OPENCODE_PLUGIN_SCHEMA_VERSION = 1;
+export const OPENCODE_PLUGIN_SCHEMA_VERSION = 2;
 
 /** Repo-relative path of the generated plugin (OpenCode auto-loads `.opencode/plugins/*.ts`). */
 export const OPENCODE_PLUGIN_RELATIVE_PATH = ".opencode/plugins/flight-recorder.ts";
@@ -19,8 +19,8 @@ export function readOpenCodePluginSchemaVersion(source: string): number | null {
 }
 
 /**
- * Builds the source of the OpenCode (>= 2.0) plugin that records tool calls
- * and step snapshots for one repository as JSONL. The log path is derived
+ * Builds the source of the OpenCode (>= 2.0) plugin that records tool calls,
+ * step snapshots and the end of each run for one repository as JSONL. The log path is derived
  * from the plugin's own location, and step events are filtered to sessions
  * running inside `repoRoot`, because one OpenCode service hosts all projects.
  */
@@ -37,6 +37,11 @@ const REPO_ROOT = ${JSON.stringify(repoRoot)}
 const LOG = fileURLToPath(new URL("../flight-recorder-events.jsonl", import.meta.url))
 // Only these tools keep their full output; others (read, glob, ...) would bloat the log.
 const FULL_PAYLOAD_TOOLS = new Set(["edit", "write", "patch", "shell", "execute"])
+const RUN_ENDED = {
+  "session.execution.succeeded": "succeeded",
+  "session.execution.failed": "failed",
+  "session.execution.interrupted": "interrupted",
+}
 
 function record(kind, fields) {
   try {
@@ -85,9 +90,15 @@ export default {
     const abort = new AbortController()
     ;(async () => {
       try {
-        for await (const ev of ctx.event.subscribe({ types: ["session.step.ended"], signal: abort.signal })) {
-          if (ev.type !== "session.step.ended" || !insideRepo(ev.location?.directory)) continue
+        const types = ["session.step.ended", ...Object.keys(RUN_ENDED)]
+        for await (const ev of ctx.event.subscribe({ types, signal: abort.signal })) {
+          if (!insideRepo(ev.location?.directory)) continue
           const data = ev.data ?? {}
+          if (RUN_ENDED[ev.type]) {
+            record("idle", { sessionID: data.sessionID, outcome: RUN_ENDED[ev.type], reason: data.reason })
+            continue
+          }
+          if (ev.type !== "session.step.ended") continue
           if (!Array.isArray(data.files) || data.files.length === 0) continue
           record("step", { sessionID: data.sessionID, messageID: data.assistantMessageID, files: data.files, snapshot: data.snapshot })
         }

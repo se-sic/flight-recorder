@@ -66,11 +66,11 @@ Flight Recorder can track Claude Code via structured hook payloads (preferred, s
 
 OpenCode support requires OpenCode 2.0 or newer; the 1.x plugin API is not supported.
 
-Run `Flight Recorder: Configure OpenCode Plugin` once per repository. It writes a small plugin to `.opencode/plugins/flight-recorder.ts`, which OpenCode loads automatically, excludes the plugin and its log from git, and switches the workspace to `activeIntegration = opencode`. The plugin appends every tool call (before and after execution, including the unified diff of each `edit`/`patch`) and the files changed per model step to `.opencode/flight-recorder-events.jsonl`, which Flight Recorder tails while recording.
+Run `Flight Recorder: Configure OpenCode Plugin` once per repository. It writes a small plugin to `.opencode/plugins/flight-recorder.ts`, which OpenCode loads automatically, excludes the plugin and its log from git, and switches the workspace to `activeIntegration = opencode`. The plugin appends every tool call (before and after execution, including the unified diff of each `edit`/`patch`), the files changed per model step, and the end of each run to `.opencode/flight-recorder-events.jsonl`, which Flight Recorder tails while recording.
 
 Known limitations:
 
-- Edits made through shell commands are only attributed at model-step granularity (from OpenCode's snapshot of changed files), with medium confidence.
+- Files changed through shell commands are claimed for the assistant while the command runs, and confirmed by OpenCode's per-step snapshot, with medium confidence; changes have no text-level evidence.
 - Changes outside the repository are not visible.
 - Re-run the configure command after updating Flight Recorder; it warns when the installed plugin is outdated.
 

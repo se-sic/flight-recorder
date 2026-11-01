@@ -78,7 +78,7 @@ export class OpenCodeIntegration implements AssistantIntegration {
         displayName: this.displayName,
         logFile: logPath,
         logSnapshotPrefix: this.logSnapshotPrefix,
-        parser: new OpenCodeParser(),
+        parser: new OpenCodeParser(repoRoot),
       };
     }
 
@@ -88,7 +88,7 @@ export class OpenCodeIntegration implements AssistantIntegration {
         assistantId: this.assistantId,
         displayName: this.displayName,
         logSnapshotPrefix: this.logSnapshotPrefix,
-        parser: new OpenCodeParser(),
+        parser: new OpenCodeParser(repoRoot),
         waitMessage: `Waiting for OpenCode to load the Flight Recorder plugin and create ${logPath}. Start OpenCode in this repository.`,
         awaitLogFile: async () => (fs.existsSync(logPath) ? logPath : null),
         setupAction: CONFIGURE_PLUGIN_ACTION,

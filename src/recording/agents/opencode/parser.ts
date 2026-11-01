@@ -33,6 +33,7 @@ type OpenCodePluginRecord = {
   app?: { name?: string; version?: string; channel?: string };
   files?: unknown[];
   snapshot?: string;
+  outcome?: string;
 };
 
 /** OpenCode's `FileDiff.Info` as found in edit/patch tool results. */
@@ -48,6 +49,22 @@ const ASSISTANT_ID = "opencode";
 const ADAPTER_ID = "opencode-plugin-log-parser";
 const FILE_EDIT_TOOLS = new Set(["edit", "write", "patch"]);
 const COMMAND_TOOLS = new Set(["shell", "execute"]);
+/** OpenCode tools that only read, search or plan and never change files. */
+const READ_ONLY_TOOLS = new Set([
+  "read",
+  "glob",
+  "grep",
+  "list",
+  "ls",
+  "lsp",
+  "webfetch",
+  "websearch",
+  "codesearch",
+  "todoread",
+  "todowrite",
+  "skill",
+  "question",
+]);
 
 /** Hashes text the same way the staging tracker hashes observed insertions (sha256 hex). */
 function hashText(text: string): string {
@@ -71,7 +88,26 @@ function capabilityForTool(toolName: string): AssistantCapability {
   if (COMMAND_TOOLS.has(toolName)) {
     return "command";
   }
+  if (READ_ONLY_TOOLS.has(toolName)) {
+    return "read-only";
+  }
   return "tool-call";
+}
+
+/**
+ * Returns the tool-run marker for a tool that may change any file while it
+ * runs (shell, code execution, subagents, MCP tools, ...); file-edit and
+ * read-only tools name their files or change nothing, so they get none.
+ */
+function toolCallPhase(
+  record: OpenCodePluginRecord,
+  phase: "started" | "finished"
+): AssistantEvent["toolCall"] {
+  const toolName = record.tool ?? "unknown";
+  if (FILE_EDIT_TOOLS.has(toolName) || READ_ONLY_TOOLS.has(toolName)) {
+    return undefined;
+  }
+  return { id: record.callID, phase };
 }
 
 /** Maps a `FileDiff.Info` status (added/deleted/modified) to a file operation kind. */
@@ -184,6 +220,15 @@ export class OpenCodeParser {
   private readonly seenRecords = new Set<string>();
   private readonly messagesWithCommands = new Set<string>();
   private readonly filesEditedByMessage = new Map<string, Set<string>>();
+
+  /**
+   * `repoRoot` resolves relative paths until a `setup` record names the
+   * session directory; recording tails the log from its end, so the setup
+   * record of an OpenCode instance started earlier is never seen.
+   */
+  constructor(repoRoot?: string) {
+    this.directory = repoRoot;
+  }
 
   /** Resolves an OpenCode path (absolute, or relative to the session directory) to an absolute path. */
   private resolvePath(candidate: string): string {
@@ -298,20 +343,27 @@ export class OpenCodeParser {
     };
   }
 
-  /** Converts a `pre` record (tool about to run) into an assistant event; file tools become deferred boundaries. */
+  /**
+   * Converts a `pre` record (tool about to run) into an assistant event.
+   * File tools become deferred boundaries; tools that may change any file
+   * mark a running tool, which keeps the assistant window open until its
+   * `post` record (or the end of the run) arrives.
+   */
   private eventFromPre(record: OpenCodePluginRecord): AssistantEvent {
     const toolName = record.tool ?? "unknown";
     if (COMMAND_TOOLS.has(toolName) && record.messageID) {
       this.messagesWithCommands.add(record.messageID);
     }
+    const isFileEditTool = FILE_EDIT_TOOLS.has(toolName);
+    const toolCall = toolCallPhase(record, "started");
 
     return {
       ...this.baseEvent(record, `pre:${toolName}`),
       kind: "tool-called",
       capability: capabilityForTool(toolName),
-      fileOperations: FILE_EDIT_TOOLS.has(toolName)
-        ? this.operationsFromToolInput(record)
-        : [],
+      fileOperations: isFileEditTool ? this.operationsFromToolInput(record) : [],
+      ...(isFileEditTool ? { origin: "assistant-tool-edit" as const } : {}),
+      ...(toolCall ? { toolCall } : {}),
       metadata: this.baseMetadata(record, { toolInput: record.input }),
     };
   }
@@ -395,21 +447,49 @@ export class OpenCodeParser {
   private eventFromPost(record: OpenCodePluginRecord): AssistantEvent {
     const toolName = record.tool ?? "unknown";
 
-    if (record.status === "completed" && FILE_EDIT_TOOLS.has(toolName)) {
-      return this.editEventFromPost(record);
+    if (FILE_EDIT_TOOLS.has(toolName)) {
+      if (record.status === "completed") {
+        return this.editEventFromPost(record);
+      }
+      // A failed file tool changed nothing, but naming its files (instead of
+      // none) keeps the window from claiming every change, and the non-boundary
+      // capability releases the boundary its `pre` opened.
+      return {
+        ...this.baseEvent(record, `post:${toolName}`),
+        kind: "tool-called",
+        capability: "file-edit",
+        fileOperations: this.operationsFromToolInput(record),
+        origin: "assistant-tool-edit",
+        metadata: this.baseMetadata(record, {
+          status: record.status,
+          error: record.error,
+        }),
+      };
     }
 
-    // Failed tools and non-editing tools carry no file operations; for a
-    // failed file tool this also releases the boundary its `pre` opened.
+    const toolCall = toolCallPhase(record, "finished");
     return {
       ...this.baseEvent(record, `post:${toolName}`),
       kind: "tool-called",
       capability: capabilityForTool(toolName),
       fileOperations: [],
+      ...(toolCall ? { toolCall } : {}),
       metadata: this.baseMetadata(record, {
         status: record.status,
         error: record.error,
       }),
+    };
+  }
+
+  /** Converts an `idle` record (an OpenCode run ended) into an event that marks every running tool as finished. */
+  private eventFromIdle(record: OpenCodePluginRecord): AssistantEvent {
+    return {
+      ...this.baseEvent(record, `idle:${record.outcome ?? "unknown"}`),
+      kind: "response-produced",
+      capability: "read-only",
+      fileOperations: [],
+      toolCall: { phase: "finished" },
+      metadata: this.baseMetadata(record, { outcome: record.outcome }),
     };
   }
 
@@ -468,6 +548,8 @@ export class OpenCodeParser {
         return this.firstSighting(record) ? this.eventFromPost(record) : null;
       case "step":
         return this.eventFromStep(record);
+      case "idle":
+        return this.eventFromIdle(record);
       default:
         return null;
     }

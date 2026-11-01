@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 import {
   hunkAddedText,
@@ -258,7 +262,7 @@ test("OpenCodeParser maps patch tool headers and applied results", () => {
   assert.equal(events[1].evidence?.length, 2);
 });
 
-test("OpenCodeParser emits failed file tools without file operations", () => {
+test("OpenCodeParser emits failed file tools as non-boundary events for their files", () => {
   const events = parseAll(
     jsonl(setupRecord(), {
       ts: 2_005,
@@ -275,7 +279,9 @@ test("OpenCodeParser emits failed file tools without file operations", () => {
 
   assert.equal(events.length, 1);
   assert.equal(events[0].kind, "tool-called");
-  assert.deepEqual(events[0].fileOperations, []);
+  assert.equal(events[0].capability, "file-edit");
+  assert.equal(events[0].toolCall, undefined);
+  assert.deepEqual(events[0].fileOperations, [{ kind: "update", path: `${REPO}/test.js` }]);
   assert.equal(events[0].metadata?.error, "oldString not found");
 });
 
@@ -290,8 +296,43 @@ test("OpenCodeParser keeps read-only tools free of file operations", () => {
   assert.equal(events.length, 2);
   for (const event of events) {
     assert.equal(event.kind, "tool-called");
+    assert.equal(event.capability, "read-only");
+    assert.equal(event.toolCall, undefined);
     assert.deepEqual(event.fileOperations, []);
   }
+});
+
+test("OpenCodeParser marks shell and unknown tools as running between pre and post", () => {
+  const events = parseAll(
+    jsonl(
+      setupRecord(),
+      ...toolCall("shell", "call_1", "msg_1", { command: "npm test" }, {}),
+      ...toolCall("task", "call_2", "msg_1", { prompt: "explore" }, {}),
+      ...toolCall("edit", "call_3", "msg_1", { path: `${REPO}/a.js` }, {})
+    )
+  );
+
+  assert.deepEqual(events[0].toolCall, { id: "call_1", phase: "started" });
+  assert.equal(events[0].capability, "command");
+  assert.deepEqual(events[1].toolCall, { id: "call_1", phase: "finished" });
+  assert.deepEqual(events[2].toolCall, { id: "call_2", phase: "started" });
+  assert.equal(events[2].capability, "tool-call");
+  assert.deepEqual(events[3].toolCall, { id: "call_2", phase: "finished" });
+  assert.equal(events[4].toolCall, undefined);
+  assert.equal(events[4].origin, "assistant-tool-edit");
+  assert.equal(events[5].toolCall, undefined);
+});
+
+test("OpenCodeParser turns the end of a run into a finish-all marker", () => {
+  const events = parseAll(
+    jsonl(setupRecord(), { ts: 5_000, kind: "idle", sessionID: SESSION, outcome: "interrupted", reason: "user" })
+  );
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].kind, "response-produced");
+  assert.equal(events[0].capability, "read-only");
+  assert.deepEqual(events[0].toolCall, { phase: "finished" });
+  assert.equal(events[0].source.rawSignal, "idle:interrupted");
 });
 
 test("OpenCodeParser attributes shell edits from step snapshots", () => {
@@ -405,4 +446,184 @@ test("buildOpenCodePluginSource embeds the schema version and repo root", () => 
   assert.ok(source.includes('ctx.tool.hook("execute.before"'));
   assert.ok(source.includes('ctx.tool.hook("execute.after"'));
   assert.equal(readOpenCodePluginSchemaVersion("export default {}"), null);
+});
+
+/** Builds a text change in `file` with a human-typed insertion. */
+function typed(file: string, text: string) {
+  return {
+    path: file,
+    insertedTextHashes: [hashInsertedText(text)],
+    insertedTextLength: text.length,
+    ranges: [{ startLine: 0, startColumn: 0, endLine: 0, endColumn: 0 }],
+  };
+}
+
+test("staging tracker does not let OpenCode reads claim human edits", () => {
+  const events = parseAll(
+    jsonl(setupRecord(), ...toolCall("read", "call_1", "msg_1", { path: `${REPO}/a.js` }, {}))
+  );
+  const tracker = new FineGrainedStagingTracker(1_000);
+
+  for (const event of events) {
+    assert.deepEqual(tracker.recordAssistantEvent(event, 2_000), []);
+  }
+  tracker.recordTextDocumentChange([typed(`${REPO}/a.js`, "x")], 2_100);
+
+  const commits = tracker.flushAll(5_000);
+  assert.deepEqual(commits.map((commit) => commit.kind), ["human"]);
+});
+
+test("staging tracker keeps the window open while an OpenCode shell command runs", () => {
+  const events = parseAll(
+    jsonl(setupRecord(), ...toolCall("shell", "call_1", "msg_1", { command: "./gen.sh" }, {}))
+  );
+  const [pre, post] = events;
+  const tracker = new FineGrainedStagingTracker(1_000);
+
+  tracker.recordAssistantEvent(pre, 2_000);
+  tracker.recordDiskChange([`${REPO}/generated.js`], 2_500);
+  // Long past the debounce, but the command has not finished yet.
+  assert.equal(tracker.flushAssistantWindowIfIdle(10_000), null);
+
+  tracker.recordAssistantEvent(post, 10_500);
+  assert.equal(tracker.flushAssistantWindowIfIdle(11_000), null);
+  const commit = tracker.flushAssistantWindowIfIdle(12_000);
+  assert.ok(commit);
+  assert.equal(commit.kind, "assistant");
+  assert.deepEqual(commit.files, [`${REPO}/generated.js`]);
+});
+
+test("staging tracker closes a window left open by an interrupted OpenCode command once the run ends", () => {
+  const events = parseAll(
+    jsonl(
+      setupRecord(),
+      { ts: 2_000, kind: "pre", tool: "shell", sessionID: SESSION, messageID: "msg_1", callID: "call_1", input: {} },
+      { ts: 3_000, kind: "idle", sessionID: SESSION, outcome: "interrupted", reason: "user" }
+    )
+  );
+  const tracker = new FineGrainedStagingTracker(1_000);
+
+  tracker.recordAssistantEvent(events[0], 2_000);
+  tracker.recordDiskChange([`${REPO}/partial.js`], 2_200);
+  assert.equal(tracker.flushAssistantWindowIfIdle(10_000), null);
+
+  tracker.recordAssistantEvent(events[1], 10_000);
+  const commit = tracker.flushAssistantWindowIfIdle(11_500);
+  assert.ok(commit);
+  assert.deepEqual(commit.files, [`${REPO}/partial.js`]);
+});
+
+test("staging tracker releases a failed OpenCode edit without claiming unrelated human edits", () => {
+  const events = parseAll(
+    jsonl(
+      setupRecord(),
+      { ts: 2_000, kind: "pre", tool: "edit", sessionID: SESSION, messageID: "msg_1", callID: "call_1", input: { path: `${REPO}/a.js` } },
+      { ts: 2_005, kind: "post", tool: "edit", sessionID: SESSION, messageID: "msg_1", callID: "call_1", input: { path: `${REPO}/a.js` }, status: "error", error: "oldString not found" }
+    )
+  );
+  const tracker = new FineGrainedStagingTracker(1_000);
+
+  tracker.recordAssistantEvent(events[0], 2_000);
+  tracker.recordAssistantEvent(events[1], 2_005);
+  tracker.recordTextDocumentChange([typed(`${REPO}/b.js`, "human")], 2_100);
+
+  // The window closes after the debounce instead of waiting forever for an
+  // edit that never materializes, and claims only the file the tool named.
+  const assistantCommit = tracker.flushAssistantWindowIfIdle(4_000);
+  assert.ok(assistantCommit);
+  assert.deepEqual(assistantCommit.files, [`${REPO}/a.js`]);
+  const commits = tracker.flushAll(5_000);
+  assert.deepEqual(commits.map((commit) => commit.kind), ["human"]);
+  assert.deepEqual(commits[0].files, [`${REPO}/b.js`]);
+});
+
+/** A fake OpenCode plugin context that captures hooks and replays bus events. */
+function fakePluginContext(directory: string, busEvents: Record<string, unknown>[]) {
+  const hooks = new Map<string, (event: Record<string, unknown>) => void>();
+  let subscribedTypes: string[] = [];
+  const ctx = {
+    app: { name: "cli", version: "2.2.2" },
+    location: { directory },
+    tool: {
+      hook: async (name: string, handler: (event: Record<string, unknown>) => void) => {
+        hooks.set(name, handler);
+      },
+    },
+    event: {
+      subscribe: ({ types }: { types: string[] }) => {
+        subscribedTypes = types;
+        return (async function* () {
+          for (const event of busEvents) {
+            yield event;
+          }
+        })();
+      },
+    },
+  };
+  return { ctx, hooks, subscribedTypes: () => subscribedTypes };
+}
+
+test("generated OpenCode plugin writes records the parser understands", async () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "fr-opencode-"));
+  try {
+    const pluginPath = path.join(repo, ".opencode", "plugins", "flight-recorder.mjs");
+    fs.mkdirSync(path.dirname(pluginPath), { recursive: true });
+    fs.writeFileSync(pluginPath, buildOpenCodePluginSource(repo));
+
+    const files = [{ file: "a.js", patch: "@@ -0,0 +1 @@\n+hi\n", status: "added" }];
+    const { ctx, hooks, subscribedTypes } = fakePluginContext(repo, [
+      { type: "session.step.ended", location: { directory: repo }, data: { sessionID: SESSION, assistantMessageID: "msg_1", files: ["b.js"], snapshot: "s1" } },
+      { type: "session.step.ended", location: { directory: "/elsewhere" }, data: { sessionID: "other", assistantMessageID: "msg_x", files: ["x.js"] } },
+      { type: "session.execution.succeeded", location: { directory: repo }, data: { sessionID: SESSION } },
+    ]);
+    const plugin = (await import(pathToFileURL(pluginPath).href)).default;
+    const dispose = await plugin.setup(ctx);
+
+    const shell = { tool: "shell", sessionID: SESSION, messageID: "msg_1", id: "call_1", agent: "build", input: { command: "echo hi > b.js" } };
+    hooks.get("execute.before")?.(shell);
+    hooks.get("execute.after")?.({ ...shell, status: "completed", result: { output: "", metadata: {} } });
+    const edit = { tool: "write", sessionID: SESSION, messageID: "msg_1", id: "call_2", agent: "build", input: { path: path.join(repo, "a.js"), content: "hi\n" } };
+    hooks.get("execute.before")?.(edit);
+    hooks.get("execute.after")?.({ ...edit, status: "completed", result: { output: { target: path.join(repo, "a.js"), existed: false }, metadata: { files } } });
+    await new Promise((resolve) => setImmediate(resolve));
+    dispose?.();
+
+    assert.ok(subscribedTypes().includes("session.execution.interrupted"));
+    const log = fs.readFileSync(path.join(repo, ".opencode", "flight-recorder-events.jsonl"), "utf8");
+    const records = log.trim().split("\n").map((line) => JSON.parse(line));
+    assert.ok(records.every((record) => record.fr === OPENCODE_PLUGIN_SCHEMA_VERSION));
+    assert.deepEqual(
+      records.map((record) => record.kind).sort(),
+      ["idle", "post", "post", "pre", "pre", "setup", "step"]
+    );
+
+    const events = Array.from(new OpenCodeParser().feed(log));
+    const signals = events.map((event) => event.source.rawSignal);
+    assert.ok(signals.includes("pre:shell"));
+    assert.ok(signals.includes("post:write"));
+    assert.ok(signals.includes("step:snapshot"));
+    assert.ok(signals.includes("idle:succeeded"));
+    const write = events.find((event) => event.source.rawSignal === "post:write");
+    assert.deepEqual(write?.fileOperations, [{ kind: "create", path: path.join(repo, "a.js") }]);
+    const step = events.find((event) => event.source.rawSignal === "step:snapshot");
+    assert.deepEqual(step?.fileOperations, [{ kind: "unknown", path: path.join(repo, "b.js") }]);
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("OpenCodeParser resolves relative paths against the repo root when it missed the setup record", () => {
+  const files = [{ file: "test.js", patch: TEST_JS_PATCH, status: "modified" }];
+  const events = Array.from(
+    new OpenCodeParser(REPO).feed(
+      jsonl(
+        ...toolCall("edit", "call_1", "msg_1", { path: `${REPO}/test.js` }, { metadata: { files } }),
+        ...toolCall("shell", "call_2", "msg_2", { command: "touch x" }, {}),
+        { ts: 3_000, kind: "step", sessionID: SESSION, messageID: "msg_2", files: ["lib/x.js"] }
+      )
+    )
+  );
+
+  assert.deepEqual(events[1].fileOperations, [{ kind: "update", path: `${REPO}/test.js` }]);
+  assert.deepEqual(events[4].fileOperations, [{ kind: "unknown", path: `${REPO}/lib/x.js` }]);
 });
