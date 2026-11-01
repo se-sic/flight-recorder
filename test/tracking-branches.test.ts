@@ -75,6 +75,33 @@ test("tracking worktree commits leave the visible branch and index untouched", a
   );
 });
 
+test("tracking worktree human commits use editor snapshots instead of the disk content", async () => {
+  const repo = makeRepo();
+  const target = await startSession(repo);
+  const filePath = path.join(repo, "README.md");
+  fs.writeFileSync(filePath, "human line\nassistant completion\n");
+
+  const res = await commitTrackedWindow(
+    repo,
+    {
+      kind: "human",
+      files: [filePath],
+      startedAt: 1_000,
+      endedAt: 2_000,
+      snapshots: { [filePath]: "human line\n" },
+    },
+    false,
+    false,
+    false,
+    target
+  );
+
+  assert.equal(res.ok, true, res.msg);
+  assert.equal(git(repo, "show", `${target.activeBranchName}:README.md`), "human line");
+  assert.equal(fs.readFileSync(filePath, "utf8"), "human line\nassistant completion\n");
+  assert.equal(git(repo, "status", "--porcelain"), "M README.md");
+});
+
 test("finalization creates the final branch and releases the worktree and active branch", async () => {
   const repo = makeRepo();
   const target = await startSession(repo);

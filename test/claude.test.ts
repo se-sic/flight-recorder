@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
+import * as path from "node:path";
 import test from "node:test";
 import { ClaudeCodeParser } from "../src/recording/agents/claude/parser";
+
+// The parser resolves paths, so on Windows this becomes C:\Users\test\...
+const APP_PATH = path.resolve("/Users/test/demo/src/app.ts");
 
 test("ClaudeCodeParser parses FileChanged hook payloads", () => {
   const parser = new ClaudeCodeParser();
@@ -24,7 +28,7 @@ test("ClaudeCodeParser parses FileChanged hook payloads", () => {
   assert.deepEqual(events[0].fileOperations, [
     {
       kind: "update",
-      path: "/Users/test/demo/src/app.ts",
+      path: APP_PATH,
     },
   ]);
 });
@@ -60,7 +64,7 @@ test("ClaudeCodeParser opens a tool window for transcript file-edit tool_use blo
   assert.deepEqual(events[0].fileOperations, [
     {
       kind: "update",
-      path: "/Users/test/demo/src/app.ts",
+      path: APP_PATH,
     },
   ]);
 });
@@ -102,7 +106,7 @@ test("ClaudeCodeParser parses successful transcript tool_result file edits", () 
   assert.deepEqual(events[0].fileOperations, [
     {
       kind: "update",
-      path: "/Users/test/demo/src/app.ts",
+      path: APP_PATH,
     },
   ]);
 });
@@ -151,7 +155,7 @@ test("ClaudeCodeParser emits a deferred boundary for hook PreToolUse file edits"
   assert.deepEqual(events[0].fileOperations, [
     {
       kind: "unknown",
-      path: "/Users/test/demo/src/app.ts",
+      path: APP_PATH,
     },
   ]);
 });
@@ -185,7 +189,7 @@ test("ClaudeCodeParser parses confirmed hook PostToolUse file creations", () => 
   assert.deepEqual(events[0].fileOperations, [
     {
       kind: "create",
-      path: "/Users/test/demo/src/app.ts",
+      path: APP_PATH,
     },
   ]);
 });
@@ -211,7 +215,7 @@ test("ClaudeCodeParser parses PostToolUseFailure hook payloads", () => {
   assert.deepEqual(events[0].fileOperations, [
     {
       kind: "unknown",
-      path: "/Users/test/demo/src/app.ts",
+      path: APP_PATH,
     },
   ]);
 });

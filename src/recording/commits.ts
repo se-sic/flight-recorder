@@ -1,4 +1,5 @@
 import * as fs from "fs";
+import * as os from "os";
 import * as path from "path";
 import {
   formatWindowCommitMessage,
@@ -906,10 +907,15 @@ function normalizeRelativeRepoPath(rel: string): string | null {
   return normalized;
 }
 
+/**
+ * Mirrors one file from the visible checkout into the tracking worktree, using
+ * the in-memory editor snapshot instead of the file on disk when one is given.
+ */
 function copySnapshotIntoCommitTarget(
   sourceRoot: string,
   commitRoot: string,
-  rel: string
+  rel: string,
+  snapshot?: string
 ): void {
   const normalizedRel = normalizeRelativeRepoPath(rel);
   if (!normalizedRel) {
@@ -918,6 +924,13 @@ function copySnapshotIntoCommitTarget(
 
   const sourcePath = path.join(sourceRoot, normalizedRel);
   const targetPath = path.join(commitRoot, normalizedRel);
+
+  if (snapshot !== undefined) {
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+    fs.rmSync(targetPath, { recursive: true, force: true });
+    fs.writeFileSync(targetPath, snapshot, "utf8");
+    return;
+  }
 
   if (!fs.existsSync(sourcePath)) {
     fs.rmSync(targetPath, { recursive: true, force: true });
@@ -946,7 +959,7 @@ async function changedFilesForCommit(
   relFiles: string[],
   addAll: boolean
 ): Promise<string[]> {
-  if (addAll || relFiles.length === 0) {
+  if (addAll) {
     return listAllChangedFiles(sourceRoot);
   }
 
@@ -998,7 +1011,8 @@ async function stageAndCommit(
   addAll: boolean,
   allowEmpty: boolean,
   dryRun: boolean,
-  target = createCurrentBranchTarget(repoRoot)
+  target = createCurrentBranchTarget(repoRoot),
+  snapshots?: Record<string, string>
 ): Promise<GitActionResult> {
   if (dryRun) {
     let wouldStage: string[] = [];
@@ -1014,8 +1028,6 @@ async function stageAndCommit(
         }
       }
       wouldStage = changedFiles;
-    } else {
-      wouldStage = await listAllChangedFiles(repoRoot);
     }
 
     const wouldCommit = wouldStage.length > 0 || allowEmpty;
@@ -1035,7 +1047,7 @@ async function stageAndCommit(
       ? "git add -A"
       : relFiles.length > 0
         ? `git add -- ${relFiles.join(" ")}`
-        : "git add -A";
+        : "no git add";
     const allowEmptyPart = allowEmpty ? " --allow-empty" : "";
 
     return {
@@ -1050,17 +1062,23 @@ async function stageAndCommit(
   }
 
   if (target.mode === "trackingWorktree") {
-    const effectiveRelFiles = await changedFilesForCommit(
-      target.sourceRoot,
-      relFiles,
-      addAll
+    // Snapshotted files are always mirrored: the disk may already hold later
+    // (e.g. assistant) changes, or may have been reverted since the edit.
+    const snapshotFor = (rel: string) =>
+      snapshots?.[path.resolve(target.sourceRoot, rel)];
+    const effectiveRelFiles = Array.from(
+      new Set([
+        ...relFiles.filter((rel) => snapshotFor(rel) !== undefined),
+        ...(await changedFilesForCommit(target.sourceRoot, relFiles, addAll)),
+      ])
     );
 
     for (const rel of effectiveRelFiles) {
       copySnapshotIntoCommitTarget(
         target.sourceRoot,
         target.commitRoot,
-        rel
+        rel,
+        snapshotFor(rel)
       );
     }
 
@@ -1116,6 +1134,10 @@ async function stageAndCommit(
   }
 
   // === Real mode (staging + commit) ===
+  //
+  // For path-specific Flight Recorder commits, use `git commit --only -- <paths>`
+  // after staging the target paths. A plain `git commit` would also include
+  // unrelated changes that were already staged before recording started.
   if (addAll) {
     const addRes = await gitCmd(["add", "-A"], repoRoot);
     if (addRes.code !== 0) {
@@ -1127,7 +1149,11 @@ async function stageAndCommit(
       return { ok: false, skipped: false, ...failure };
     }
   } else {
-    if (relFiles.length > 0) {
+    if (relFiles.length === 0) {
+      if (!allowEmpty) {
+        return { ok: false, skipped: true, msg: `No tracked files for ${ts}` };
+      }
+    } else {
       const addRes = await gitCmd(["add", "--", ...relFiles], repoRoot);
       if (addRes.code !== 0) {
         const failure = classifyGitFailure(
@@ -1137,24 +1163,17 @@ async function stageAndCommit(
         );
         return { ok: false, skipped: false, ...failure };
       }
-    } else {
-      const addRes = await gitCmd(["add", "-A"], repoRoot);
-      if (addRes.code !== 0) {
-        const failure = classifyGitFailure(
-          "add",
-          addRes,
-          "Failed to stage repository changes."
-        );
-        return { ok: false, skipped: false, ...failure };
-      }
     }
   }
 
-  const diffCached = await gitCmd(
-    ["diff", "--cached", "--name-only"],
-    repoRoot
-  );
-  const stagedAny = diffCached.out.trim().length > 0;
+  let stagedAny = false;
+  if (addAll || relFiles.length > 0) {
+    const diffArgs = addAll
+      ? ["diff", "--cached", "--name-only"]
+      : ["diff", "--cached", "--name-only", "--", ...relFiles];
+    const diffCached = await gitCmd(diffArgs, repoRoot);
+    stagedAny = diffCached.out.trim().length > 0;
+  }
 
   if (!stagedAny && !allowEmpty) {
     return { ok: false, skipped: true, msg: `No staged changes for ${ts}` };
@@ -1163,6 +1182,12 @@ async function stageAndCommit(
   const args = ["commit", "-m", msg];
   if (allowEmpty && !stagedAny) {
     args.splice(1, 0, "--allow-empty");
+  }
+  if (!addAll) {
+    args.push("--only");
+    if (relFiles.length > 0) {
+      args.push("--", ...relFiles);
+    }
   }
 
   const res = await gitCmd(args, repoRoot);
@@ -1200,6 +1225,10 @@ export async function commitTrackedWindow(
 
   const msg = formatWindowCommitMessage(commit, repoRoot);
   const ts = new Date(commit.endedAt).toISOString();
+  const snapshots = commit.kind === "human" ? commit.snapshots : undefined;
+  if (snapshots && !dryRun && !addAll && commitTarget.mode === "currentBranch") {
+    return commitWithSnapshots(repoRoot, msg, relFiles, snapshots);
+  }
   return stageAndCommit(
     repoRoot,
     msg,
@@ -1208,8 +1237,75 @@ export async function commitTrackedWindow(
     addAll,
     allowEmpty,
     dryRun,
-    commitTarget
+    commitTarget,
+    snapshots
   );
+}
+
+/**
+ * Commits `relFiles`, taking the content of snapshotted files from memory
+ * instead of the working tree. Builds the commit in a temporary index so the
+ * working tree and unrelated staged changes stay untouched, then resets the
+ * real index entries of the committed paths to the new HEAD.
+ */
+async function commitWithSnapshots(
+  repoRoot: string,
+  msg: string,
+  relFiles: string[],
+  snapshots: Record<string, string>
+): Promise<GitActionResult> {
+  const env = {
+    GIT_INDEX_FILE: path.join(os.tmpdir(), `flight-recorder-${process.pid}-${Date.now()}.index`),
+  };
+  const fail = (res: GitCommandResult, stage: "add" | "commit", what: string): GitActionResult => ({
+    ok: false,
+    skipped: false,
+    ...classifyGitFailure(stage, res, what),
+  });
+
+  try {
+    const hasHead = (await gitCmd(["rev-parse", "--verify", "-q", "HEAD"], repoRoot)).code === 0;
+    const readTree = await gitCmd(["read-tree", hasHead ? "HEAD" : "--empty"], repoRoot, { env });
+    if (readTree.code !== 0) {
+      return fail(readTree, "add", "Failed to prepare a temporary index.");
+    }
+
+    for (const rel of relFiles) {
+      const gitPath = rel.split(path.sep).join("/");
+      const snapshot = snapshots[path.resolve(repoRoot, rel)];
+      if (snapshot === undefined) {
+        const addRes = await gitCmd(["add", "--", rel], repoRoot, { env });
+        if (addRes.code !== 0) {
+          return fail(addRes, "add", `Failed to stage ${rel}.`);
+        }
+        continue;
+      }
+
+      const blob = await gitCmd(["hash-object", "-w", "--stdin", `--path=${gitPath}`], repoRoot, { input: snapshot });
+      const mode = (await gitCmd(["ls-files", "-s", "--", gitPath], repoRoot, { env })).out.split(" ")[0] || "100644";
+      const update = await gitCmd(
+        ["update-index", "--add", "--cacheinfo", `${mode},${blob.out.trim()},${gitPath}`],
+        repoRoot,
+        { env }
+      );
+      if (blob.code !== 0 || update.code !== 0) {
+        return fail(blob.code !== 0 ? blob : update, "add", `Failed to stage human edits of ${rel}.`);
+      }
+    }
+
+    const commitRes = await gitCmd(["commit", "-m", msg], repoRoot, { env });
+    if (commitRes.code !== 0) {
+      if (`${commitRes.out}${commitRes.err}`.includes("nothing to commit")) {
+        return { ok: false, skipped: true, msg: "No staged human changes." };
+      }
+      return fail(commitRes, "commit", "Failed to commit human edits.");
+    }
+
+    await gitCmd(["reset", "-q", "--", ...relFiles], repoRoot);
+    return { ok: true, skipped: false, msg, err: commitRes.err };
+  } finally {
+    await fs.promises.rm(env.GIT_INDEX_FILE, { force: true });
+  }
 }
 
 /**
@@ -1268,7 +1364,10 @@ export async function commitAssistantLogSnapshot(
 
   // Create a dedicated commit for the shutdown snapshot.
   const msg = `recording stopped: ${stamp} | log file: ${relSnapshotPath}`;
-  const commitRes = await gitCmd(["commit", "-m", msg], commitTarget.commitRoot);
+  const commitRes = await gitCmd(
+    ["commit", "-m", msg, "--only", "--", relSnapshotPath],
+    commitTarget.commitRoot
+  );
   if (commitRes.code !== 0) {
     const failure = classifyGitFailure(
       "commit",
@@ -1352,7 +1451,10 @@ export async function commitChatExportSnapshot(
   }
 
   const msg = `chat export: ${relChatExportDir}`;
-  const commitRes = await gitCmd(["commit", "-m", msg], commitTarget.commitRoot);
+  const commitRes = await gitCmd(
+    ["commit", "-m", msg, "--only", "--", relChatExportDir],
+    commitTarget.commitRoot
+  );
   if (commitRes.code !== 0) {
     const failure = classifyGitFailure(
       "commit",

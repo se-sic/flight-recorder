@@ -180,54 +180,59 @@ function collectInsertedTexts(value: unknown, parentKey = ""): string[] {
   return texts;
 }
 
+/** A candidate coordinate and whether its format counts from 1 (Monaco) rather than 0 (LSP). */
+type Coordinate = [value: unknown, oneBased: boolean];
+
+/** Returns the first numeric candidate as a 0-based coordinate. */
+function zeroBased(...candidates: Coordinate[]): number | undefined {
+  for (const [value, oneBased] of candidates) {
+    if (typeof value === "number") {
+      return oneBased ? value - 1 : value;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Normalizes a range in any of the shapes chat sessions use — flat Monaco
+ * (`startLineNumber`/`startColumn`), flat LSP-like (`startLine`/`startCharacter`)
+ * or nested `start`/`end` positions — to 0-based coordinates. A missing end
+ * defaults to the start.
+ */
 function normalizeRangeObject(value: unknown): ProposedRange | null {
   if (!isObject(value)) {
     return null;
   }
 
-  const start = isObject(value.start) ? value.start : undefined;
-  const end = isObject(value.end) ? value.end : undefined;
+  const start = isObject(value.start) ? value.start : {};
+  const end = isObject(value.end) ? value.end : {};
 
-  const startLine =
-    typeof value.startLineNumber === "number"
-      ? value.startLineNumber - 1
-      : typeof value.startLine === "number"
-        ? value.startLine
-        : typeof start?.line === "number"
-          ? start.line
-          : typeof start?.lineNumber === "number"
-            ? start.lineNumber - 1
-            : undefined;
-  const startColumn =
-    typeof value.startColumn === "number"
-      ? value.startColumn - 1
-      : typeof value.startCharacter === "number"
-        ? value.startCharacter
-        : typeof start?.character === "number"
-          ? start.character
-          : typeof start?.column === "number"
-            ? start.column - 1
-            : undefined;
+  const startLine = zeroBased(
+    [value.startLineNumber, true],
+    [value.startLine, false],
+    [start.line, false],
+    [start.lineNumber, true]
+  );
+  const startColumn = zeroBased(
+    [value.startColumn, true],
+    [value.startCharacter, false],
+    [start.character, false],
+    [start.column, true]
+  );
   const endLine =
-    typeof value.endLineNumber === "number"
-      ? value.endLineNumber - 1
-      : typeof value.endLine === "number"
-        ? value.endLine
-        : typeof end?.line === "number"
-          ? end.line
-          : typeof end?.lineNumber === "number"
-            ? end.lineNumber - 1
-            : startLine;
+    zeroBased(
+      [value.endLineNumber, true],
+      [value.endLine, false],
+      [end.line, false],
+      [end.lineNumber, true]
+    ) ?? startLine;
   const endColumn =
-    typeof value.endColumn === "number"
-      ? value.endColumn - 1
-      : typeof value.endCharacter === "number"
-        ? value.endCharacter
-        : typeof end?.character === "number"
-          ? end.character
-          : typeof end?.column === "number"
-            ? end.column - 1
-            : startColumn;
+    zeroBased(
+      [value.endColumn, true],
+      [value.endCharacter, false],
+      [end.character, false],
+      [end.column, true]
+    ) ?? startColumn;
 
   if (
     startLine === undefined ||

@@ -1,6 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
+export { CHAT_EXPORT_PATH, LOG_EXPORT_PATH } from "./constants";
 
 const EXTHOST_DIR_PATTERN = /^exthost\d*$/i;
 
