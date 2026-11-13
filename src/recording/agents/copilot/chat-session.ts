@@ -5,6 +5,7 @@ import type * as vscode from "vscode";
 import { AssistantEvent, FileOperation } from "../../event";
 import { AssistantRuntimeEventSource } from "../../integration";
 import { fileUriToPath } from "./parser";
+import { normalizePath, uriToPath } from "../../../utils/fs-path";
 
 type JsonObject = Record<string, unknown>;
 
@@ -382,7 +383,7 @@ export class CopilotChatSessionParser {
   ): AssistantEvent {
     const fileOperations: FileOperation[] = filePaths.map((filePath) => ({
       kind: "update",
-      path: path.resolve(filePath),
+      path: normalizePath(filePath),
     }));
 
     return {
@@ -477,7 +478,7 @@ export class CopilotChatSessionWatcher
       return null;
     }
 
-    return path.join(path.dirname(storageUri.fsPath), "chatSessions");
+    return path.join(path.dirname(uriToPath(storageUri)), "chatSessions");
   }
 
   private clearPollTimer(): void {

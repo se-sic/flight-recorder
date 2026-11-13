@@ -1,5 +1,5 @@
 import * as path from "path";
-import { URL } from "url";
+import { normalizePath, pathFromFileUri } from "../../../utils/fs-path";
 import {
   AssistantEvent,
   FileOperation,
@@ -10,25 +10,9 @@ const ACCEPTED_RE = /\bghostText\.accepted\b(?:.*\bchoiceIndex:\s*(\d+)\b)?/;
 const GET_COMPLETIONS_FILE_RE = /\bRequesting for\s+(file:\/\/\S+)/;
 const GET_COMPLETIONS_LOCATION_RE = /\bat\s+(\d+):(\d+)\b/;
 
-/** Converts a `file://` URI to a filesystem path (stripping the leading slash on Windows drive paths), or returns the input unchanged if it's not a valid file URI. */
+/** Converts a `file://` URI to a normalized filesystem path, or returns the input unchanged if it's not a valid file URI. */
 export function fileUriToPath(uri: string): string {
-  try {
-    const u = new URL(uri);
-    if (u.protocol !== "file:") {
-      return uri;
-    }
-
-    // URL pathname is already decoded-ish; keep it robust
-    let p = decodeURIComponent(u.pathname);
-
-    // Windows: /C:/... => C:/...
-    if (process.platform === "win32" && /^\/[A-Za-z]:\//.test(p)) {
-      p = p.slice(1);
-    }
-    return p;
-  } catch {
-    return uri;
-  }
+  return pathFromFileUri(uri) ?? uri;
 }
 
 /** Parses GitHub Copilot Chat events (agent edit-tool patches and inline completion acceptances) from its debug log text, fed incrementally as raw chunks. */
@@ -75,7 +59,7 @@ export class CopilotLogParser {
               : opKind === "Delete"
                 ? "delete"
                 : "update",
-          path: path.resolve(candidate),
+          path: normalizePath(candidate),
         });
       }
 
@@ -92,7 +76,7 @@ export class CopilotLogParser {
       if (typeof val === "string" && val.trim()) {
         operations.push({
           kind: "update",
-          path: path.resolve(val),
+          path: normalizePath(val),
         });
       }
     }
@@ -106,7 +90,7 @@ export class CopilotLogParser {
         if (val.includes(path.sep) || val.includes("/") || /\.\w+$/.test(val)) {
           operations.push({
             kind: "unknown",
-            path: path.resolve(val),
+            path: normalizePath(val),
           });
         }
       }

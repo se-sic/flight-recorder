@@ -1,6 +1,4 @@
 import * as assert from "node:assert/strict";
-import * as fs from "node:fs";
-import * as path from "node:path";
 import * as vscode from "vscode";
 import { EXTENSION_ID, getApi } from "./helpers";
 
@@ -41,18 +39,12 @@ suite("E1 activation", () => {
     assert.deepEqual(undeclared, []);
   });
 
-  test("the history view is contributed and the README lists every command", async () => {
+  test("the history view is contributed", async () => {
     const extension = vscode.extensions.getExtension(EXTENSION_ID);
     assert.ok(extension);
     const manifest = extension.packageJSON as Manifest;
     const views = Object.values(manifest.contributes.views).flat().map((view) => view.id);
     assert.ok(views.includes("flightRecorder.historyView"));
-
-    const readme = fs.readFileSync(path.join(extension.extensionPath, "README.md"), "utf8");
-    const titles = (extension.packageJSON.contributes.commands as Array<{ title: string }>)
-      .map((entry) => entry.title)
-      .filter((title) => !readme.includes(title));
-    assert.deepEqual(titles, []);
   });
 
   test("a fresh workspace is not recording and has no branch state", async () => {

@@ -1,4 +1,4 @@
-import * as path from "path";
+import { normalizePath } from "../utils/fs-path";
 
 export type AssistantCapability =
   | "inline-completion"
@@ -75,15 +75,10 @@ export type AssistantEvent = {
   metadata?: Record<string, unknown>;
 };
 
-/** Resolves a path to a normalized absolute form. */
-function normalizeFilePath(candidate: string): string {
-  return path.resolve(candidate);
-}
-
 /** Collects the sorted, deduplicated, absolute file paths touched by an assistant event's file operations. */
 export function collectEventFilePaths(ev: AssistantEvent): string[] {
   const filePaths = new Set(
-    ev.fileOperations.map((operation) => normalizeFilePath(operation.path))
+    ev.fileOperations.map((operation) => normalizePath(operation.path))
   );
 
   return Array.from(filePaths).sort((left, right) => left.localeCompare(right));

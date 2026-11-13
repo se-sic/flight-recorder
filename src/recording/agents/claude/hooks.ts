@@ -2,6 +2,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
 import { gitCmd } from "../../../utils/git";
+import { normalizePath } from "../../../utils/fs-path";
 import { getWorkspaceRepoRoot } from "../../../utils/paths";
 import { EXTENSION_NAME } from "../../../utils/constants";
 import {
@@ -98,7 +99,7 @@ async function getGitTopLevel(repoRoot: string): Promise<string> {
     throw new Error("The opened folder is not a git repository.");
   }
 
-  return path.resolve(res.out.trim());
+  return normalizePath(res.out.trim());
 }
 
 /** Appends a line to a file if it is not already present (trimmed comparison), creating the file/directory if needed. */

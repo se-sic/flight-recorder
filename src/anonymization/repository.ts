@@ -4,6 +4,7 @@ import * as path from "path";
 import { spawn } from "child_process";
 import * as vscode from "vscode";
 import { gitCmd } from "../utils/git";
+import { uriToPath } from "../utils/fs-path";
 import {
   AbsolutePathHandling,
   absolutePathReplacementExpressions,
@@ -381,7 +382,7 @@ export async function anonymizeCurrentRepository(
     canSelectMany: false,
     openLabel: "Select anonymized repo destination",
   });
-  const targetFolder = targetFolderPick?.[0]?.fsPath;
+  const targetFolder = targetFolderPick?.[0] ? uriToPath(targetFolderPick[0]) : undefined;
   if (!targetFolder) {
     return {
       ok: false,

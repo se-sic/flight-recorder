@@ -38,6 +38,7 @@ import {
 import { EXTENSION_NAME } from "../utils/constants";
 import { gitCmd } from "../utils/git";
 import { getLogChannel } from "../utils/logging";
+import { uriToPath } from "../utils/fs-path";
 
 type ActiveVisualization = {
   editorUri: string;
@@ -381,7 +382,7 @@ async function applyVisualizationToEditor(
     return;
   }
 
-  const filePath = editor.document.uri.fsPath;
+  const filePath = uriToPath(editor.document.uri);
   const repoRootResult = await resolveRepoRootForFile(filePath);
   if (isStale()) { return; }
   if (!repoRootResult.ok) {

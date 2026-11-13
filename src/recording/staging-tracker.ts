@@ -1,4 +1,3 @@
-import * as path from "path";
 import * as crypto from "crypto";
 import {
   AssistantEvent,
@@ -6,6 +5,7 @@ import {
   collectEventFilePaths,
   EditOrigin,
 } from "./event";
+import { normalizePath, relativePathInside } from "../utils/fs-path";
 import { EXTENSION_NAME } from "../utils/constants";
 
 export type HumanWindowCommit = {
@@ -102,7 +102,7 @@ function normalizePaths(paths: Iterable<string>): string[] {
     new Set(
       Array.from(paths)
         .filter((candidate) => candidate.trim().length > 0)
-        .map((candidate) => path.resolve(candidate))
+        .map((candidate) => normalizePath(candidate))
     )
   ).sort((left, right) => left.localeCompare(right));
 }
@@ -294,7 +294,7 @@ function attributionFromEvent(
   const proposedTextHashes = collectEvidenceTextHashes(evidence);
 
   return {
-    path: path.resolve(filePath),
+    path: normalizePath(filePath),
     origin: event.origin ?? "assistant-unknown",
     confidence:
       proposedTextHashes.length > 0 || evidence.length > 0 ? "medium" : "low",
@@ -490,7 +490,7 @@ export class FineGrainedStagingTracker {
     const normalizedChanges = Array.from(changes)
       .map((change) => ({
         ...change,
-        path: path.resolve(change.path),
+        path: normalizePath(change.path),
       }))
       .filter((change) => change.path.trim().length > 0);
 
@@ -742,15 +742,8 @@ function formatIsoTimestamp(at: number): string {
 }
 
 function formatCommitPath(filePath: string, repoRoot?: string): string {
-  const absolute = path.resolve(filePath);
-  if (!repoRoot) {
-    return absolute;
-  }
-
-  const absRepo = path.resolve(repoRoot);
-  return absolute === absRepo || absolute.startsWith(absRepo + path.sep)
-    ? path.relative(repoRoot, absolute).split(path.sep).join("/")
-    : absolute;
+  const absolute = normalizePath(filePath);
+  return (repoRoot && relativePathInside(repoRoot, absolute)) || absolute;
 }
 
 function formatCommitPaths(files: string[], repoRoot?: string): string[] {

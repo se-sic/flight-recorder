@@ -45,7 +45,8 @@ src/
                                decorations, legend webview
   anonymization/               git-filter-repo install in a private venv, rewrite of identities
                                and absolute paths
-  utils/                       git runner, logging channel, paths, file tailer, constants
+  utils/                       git runner, logging channel, file tailer, constants;
+                               fs-path.ts: path normalization (see "File paths" below)
 test/                          Unit tests (node:test), run outside VS Code
 test/e2e/                      End-to-end tests (mocha, run inside VS Code via @vscode/test-cli)
 assets/                        Extension icons
@@ -91,6 +92,26 @@ Creates `anonymous-repo-<timestamp>` in a chosen folder using a pinned `git-filt
 
 Combines `git blame` with patch replay (`visualization/blame.ts`) to assign each line to a commit. Lines are colored by commit age in the whole history (`global`) or in the file (`file`), or by event origin (`event`: agent edit, inline completion, mixed). The legend webview lets the user switch mode and palette (Paul Tol color schemes). Only saved `file:` documents are decorated.
 
+## File paths
+
+The extension must work on Windows, macOS and Linux, and paths reach it from several sources that spell the same file differently. VS Code reports `e:\repo\a.ts`, Claude Code `E:\repo\a.ts`, Copilot logs `file:///e%3A/repo/a.ts`, and on macOS git may report `/private/var/...` where Node sees `/var/...`. Comparing such strings directly makes attribution, snapshots and anonymization silently fail.
+
+All path handling therefore goes through `src/utils/fs-path.ts`:
+
+- **Normalize every path where it enters the extension**, and compare plain strings afterwards. The entry points are VS Code URIs, assistant logs, hook payloads, git output and settings.
+  - `normalizePath(...segments)`: use it instead of `path.resolve` for any path that is stored or compared. It returns an absolute path with native separators, no trailing separator and an upper-case Windows drive letter. The rest of the path keeps its case.
+  - `uriToPath(uri)`: use it instead of `uri.fsPath`. Lint rejects `.fsPath` everywhere else.
+  - `pathFromFileUri(uri)`: use it for `file://` strings in logs. Do not parse URIs by hand.
+- **Compare and relate paths with the helpers:**
+  - `samePath(a, b)`: case-insensitive on Windows. Use it for roots and directories that users may type, such as a terminal `cwd`.
+  - `relativePathInside(root, p)`: returns a relative path with `/`, or null if `p` is outside `root`. Do not use `startsWith(root)`.
+  - `realDirectoryPath(dir)`: resolves symlinks. Use it only for directories such as the repository or worktree roots, never for files, because a symlinked file must be committed as the link.
+- **Text matching is a separate case.** Anonymization searches for paths inside log text, so it has to list every spelling of the repository root (`repoRootReplacementPairs` in `anonymization/path-sanitization.ts`). Add new spellings there.
+- **Tests must hold on every OS:**
+  - Build file URIs with `pathToFileURL` and expected paths with `normalizePath`. Do not concatenate strings such as `file://${dir}`.
+  - Mark tests for platform-specific behavior with `{ skip: process.platform !== "win32" }` or a similar check.
+  - Expect missing permissions: creating symlinks on Windows requires Developer Mode.
+
 ## Development
 
 ```sh
@@ -106,6 +127,7 @@ E2E tests (`.vscode-test.mjs`) create a fresh throwaway Git repository as the wo
 ## Conventions
 
 - TypeScript, strict mode. Shell out to Git with `gitCmd` from `utils/git.ts`. Log to the shared output channel with `getLogChannel()`.
+- Handle file paths only through `utils/fs-path.ts` (see "File paths").
 - Give exported functions a one-line `/** … */` doc comment that says what the function does.
 - New commands and settings must be declared in `package.json` `contributes`. Commands use the `flightRecorder.` prefix and a `Flight Recorder: …` title.
 - Never modify the user's checked-out branch, index or working tree in `trackingWorktree` mode, and never force-push or force-update recording branches.

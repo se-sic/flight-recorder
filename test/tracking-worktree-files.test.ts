@@ -168,7 +168,7 @@ test("reverting a file to the source branch version is recorded on the recording
 
 // --- U2: file operations mirrored into the worktree ---
 
-test("worktree commits mirror deletes, renames, new files in subdirectories and symlinks", async () => {
+test("worktree commits mirror deletes, renames, new files in subdirectories and symlinks", async (t) => {
   const repo = makeRepo();
   write(repo, "old.txt", "old\n");
   write(repo, "gone.txt", "gone\n");
@@ -179,7 +179,17 @@ test("worktree commits mirror deletes, renames, new files in subdirectories and 
   fs.rmSync(path.join(repo, "gone.txt"));
   fs.renameSync(path.join(repo, "old.txt"), path.join(repo, "new.txt"));
   write(repo, "src/deep/file.ts", "export {};\n");
-  fs.symlinkSync("new.txt", path.join(repo, "link.txt"));
+  // Windows only allows symlinks with Developer Mode or admin rights.
+  let withSymlink = true;
+  try {
+    fs.symlinkSync("new.txt", path.join(repo, "link.txt"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EPERM") {
+      throw error;
+    }
+    withSymlink = false;
+    t.diagnostic("symlink checks skipped: creating symlinks is not permitted here");
+  }
 
   const res = await commitWindow(repo, target, "human", [
     "gone.txt",
@@ -193,11 +203,13 @@ test("worktree commits mirror deletes, renames, new files in subdirectories and 
   const branch = target.activeBranchName;
   assert.deepEqual(
     git(repo, "ls-tree", "-r", "--name-only", branch).split("\n").sort(),
-    ["README.md", "link.txt", "new.txt", "src/deep/file.ts"]
+    ["README.md", ...(withSymlink ? ["link.txt"] : []), "new.txt", "src/deep/file.ts"]
   );
   assert.equal(git(repo, "show", `${branch}:new.txt`), "old");
-  assert.match(git(repo, "ls-tree", branch, "link.txt"), /^120000 /);
-  assert.equal(git(repo, "show", `${branch}:link.txt`), "new.txt");
+  if (withSymlink) {
+    assert.match(git(repo, "ls-tree", branch, "link.txt"), /^120000 /);
+    assert.equal(git(repo, "show", `${branch}:link.txt`), "new.txt");
+  }
   assert.equal(git(repo, "rev-parse", "HEAD"), git(repo, "rev-parse", "main"));
   assert.equal(git(repo, "branch", "--show-current"), "main");
 });

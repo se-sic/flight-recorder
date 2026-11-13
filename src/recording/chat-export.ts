@@ -9,6 +9,7 @@ import {
 } from "./agents/copilot/cli-sessions";
 import { CHAT_EXPORT_PATH } from "../utils/constants";
 import { getLogChannel } from "../utils/logging";
+import { uriToPath } from "../utils/fs-path";
 
 export type ChatExportResult =
   | { ok: true; count: number; destDir: string }
@@ -102,7 +103,7 @@ export async function exportCurrentWorkspaceChats(
     };
   }
 
-  const extensionStorageDir = currentWsStorageUri.fsPath;
+  const extensionStorageDir = uriToPath(currentWsStorageUri);
   const workspaceDir = path.dirname(extensionStorageDir);
   getLogChannel().info(`Current workspace storage: ${workspaceDir}`);
   const chatSessionsDir = path.join(workspaceDir, "chatSessions");

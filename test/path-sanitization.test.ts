@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 import {
   absolutePathReplacementExpressions,
   generatedLogSanitizationCallback,
@@ -88,7 +89,18 @@ test("generated logs: absolute paths in every form are replaced", { skip: !hasPy
 test("generated logs: file URIs become one clean placeholder", { skip: !hasPython }, () => {
   assertGeneratedLog([
     ["uri file:///Users/alice/x.ts end", "uri file:///<ABSOLUTE_PATH> end"],
-    [`uri file://${REPO}/src/app.ts`, "uri file:///<REPO_ROOT>/src/app.ts"],
+    [`uri ${pathToFileURL(REPO).href}/src/app.ts`, "uri file:///<REPO_ROOT>/src/app.ts"],
+  ]);
+});
+
+test("generated logs: repo root matches the drive-letter spellings VS Code uses", { skip: !hasPython || process.platform !== "win32" }, () => {
+  // On Windows REPO is e.g. `E:\Users\alice\study\repo`; VS Code writes `e:` and `e%3A`.
+  const lowerUri = pathToFileURL(REPO).href.replace(/^file:\/\/\/([A-Z]):/, (_, d: string) => `file:///${d.toLowerCase()}:`);
+  const lowerPath = REPO[0].toLowerCase() + REPO.slice(1);
+  assertGeneratedLog([
+    [`uri ${lowerUri}/src/app.ts`, "uri file:///<REPO_ROOT>/src/app.ts"],
+    [`uri ${lowerUri.replace(/^(file:\/\/\/[a-z]):/, "$1%3A")}/src/app.ts`, "uri file:///<REPO_ROOT>/src/app.ts"],
+    [`edit ${lowerPath}\\src\\app.ts`, "edit <REPO_ROOT>\\src\\app.ts"],
   ]);
 });
 
