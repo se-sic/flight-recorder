@@ -297,7 +297,13 @@ function createTrackingSessionId(): string {
   return sanitizeRefSegment(`${stamp}-${suffix}`);
 }
 
-async function readSourceBranchName(repoRoot: string): Promise<string> {
+/** Returns the name of the finalized recording branch for a source branch, e.g. `flight-recorder/main`. */
+export function recordingBranchName(sourceBranchName: string, trackingBranchPrefix: string): string {
+  return `${sanitizeTrackingBranchPrefix(trackingBranchPrefix)}/${sanitizeRefSegment(sourceBranchName)}`;
+}
+
+/** Returns the checked-out branch, or `detached-<hash>` for a detached HEAD. */
+export async function readSourceBranchName(repoRoot: string): Promise<string> {
   const branch = await gitCmd(["branch", "--show-current"], repoRoot);
   const currentBranch = branch.out.trim();
   if (branch.code === 0 && currentBranch.length > 0) {
@@ -375,7 +381,7 @@ export async function prepareRecordingCommitTarget(
   const sourceBranchName = await readSourceBranchName(sourceRoot);
   const prefix = sanitizeTrackingBranchPrefix(options.trackingBranchPrefix);
   const sourceBranchSegment = sanitizeRefSegment(sourceBranchName);
-  const finalBranchName = `${prefix}/${sourceBranchSegment}`;
+  const finalBranchName = recordingBranchName(sourceBranchName, options.trackingBranchPrefix);
   const sessionId = createTrackingSessionId();
   const activeBranchName = `${activeBranchNamespace(prefix)}${sourceBranchSegment}/${sessionId}`;
   const commonGitDir = await readCommonGitDir(sourceRoot);

@@ -46,7 +46,8 @@ src/
   anonymization/               git-filter-repo install in a private venv, rewrite of identities
                                and absolute paths
   utils/                       git runner, logging channel, file tailer, constants;
-                               fs-path.ts: path normalization (see "File paths" below)
+                               fs-path.ts: path normalization (see "File paths" below);
+                               webview.ts: styles and helpers shared by both webviews
 test/                          Unit tests (node:test), run outside VS Code
 test/e2e/                      End-to-end tests (mocha, run inside VS Code via @vscode/test-cli)
 assets/                        Extension icons

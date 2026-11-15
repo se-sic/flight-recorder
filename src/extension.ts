@@ -109,8 +109,12 @@ export function activate(context: vscode.ExtensionContext): FlightRecorderApi {
 
   const editHistoryVisualizationCmd = vscode.commands.registerCommand(
     "flightRecorder.editHistoryVisualization",
-    async () => {
-      await startEditHistoryVisualization(context);
+    async (revision?: unknown) => {
+      // The history panel passes the recording branch; the command palette passes nothing.
+      await startEditHistoryVisualization(
+        context,
+        typeof revision === "string" ? revision : undefined
+      );
     }
   );
 

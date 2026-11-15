@@ -16,6 +16,8 @@ import {
   RecordingFinalizationResult,
   RecordingCommitMode,
   RecordingCommitTarget,
+  readSourceBranchName,
+  recordingBranchName,
   validateGitRecordingReadiness,
 } from "./commits";
 import { Tailer } from "../utils/tailer";
@@ -164,6 +166,39 @@ export function getRecordingBranchState(): RecordingBranchUiState | null {
     return stateFromSession(running, false);
   }
   return lastRecordingBranchState;
+}
+
+/**
+ * Returns the branch state the history panel shows: the running session, or
+ * otherwise the recording branch of the checked-out branch, so the panel
+ * follows branch switches. The last recording's details are kept when it
+ * was made on the checked-out branch.
+ */
+export async function getPanelBranchState(): Promise<RecordingBranchUiState | null> {
+  const last = getRecordingBranchState();
+  const repoRoot = workspaceRootPath();
+  const cfg = vscode.workspace.getConfiguration("flightRecorder");
+  if (running || !repoRoot || cfg.get<RecordingCommitMode>("commitMode", "trackingWorktree") !== "trackingWorktree") {
+    return last;
+  }
+
+  const sourceBranchName = await readSourceBranchName(repoRoot);
+  if (last?.commitMode === "trackingWorktree" && last.sourceBranchName === sourceBranchName) {
+    return last;
+  }
+  const finalBranchName = recordingBranchName(
+    sourceBranchName,
+    cfg.get<string>("trackingBranchPrefix", "flight-recorder")
+  );
+  return {
+    repoRoot,
+    isRecording: false,
+    commitMode: "trackingWorktree",
+    sourceBranchName,
+    finalBranchName,
+    displayBranchName: finalBranchName,
+    finalized: true,
+  };
 }
 
 /** Resolves a `file:` scheme URI to a normalized absolute path, or null for non-file URIs. */

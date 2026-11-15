@@ -10,6 +10,7 @@ import {
   type EventOriginKind,
 } from "./coloring";
 import { SEQUENTIAL_PALETTES, QUALITATIVE_PALETTES } from "./palettes";
+import { escapeHtml, formatRelativeTime, SHARED_WEBVIEW_CSS } from "../utils/webview";
 
 export type { VisualizationColoringMode, CommitDecorationPalette, EventOriginKind };
 
@@ -19,22 +20,17 @@ export type LegendPanelCallbacks = {
   onDispose: () => void;
 };
 
-/** Formats a Unix author timestamp (seconds) as a locale date string, or "unknown date" if absent. */
-function formatAuthorDate(authorTime: number | null): string {
-  if (authorTime === null) {
-    return "unknown date";
-  }
-  return new Date(authorTime * 1000).toLocaleString();
-}
-
-/** Escapes text for safe embedding in the legend webview's HTML. */
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
+/**
+ * Shortens a commit subject for a card heading: drops the "Flight Recorder:"
+ * prefix, the file count and the JSON metadata git folds into the subject.
+ */
+function commitTitle(summary: string): string {
+  const title = summary
+    .replace(/\s*\{.*$/, "")
+    .replace(/^Flight Recorder:\s*/, "")
+    .replace(/\s*\(\d+ files?\)$/, "")
+    .trim();
+  return title ? title[0].toUpperCase() + title.slice(1) : "No summary";
 }
 
 /** Pluralizes a line count for display (e.g. "1 line" vs "3 lines"). */
@@ -63,27 +59,19 @@ export function buildLegendEmptyHtml(reason: string): string {
   <head>
     <meta charset="UTF-8" />
     <style>
-      body {
-        font-family: var(--vscode-font-family);
-        color: var(--vscode-foreground);
-        background: var(--vscode-editor-background);
-        padding: 16px;
-      }
-      .hint {
-        color: var(--vscode-descriptionForeground);
-        line-height: 1.5;
-      }
+${SHARED_WEBVIEW_CSS}
+      body { background: var(--vscode-editor-background); }
     </style>
   </head>
   <body>
-    <div class="hint">${escapeHtml(reason)}</div>
+    <div class="empty">${escapeHtml(reason)}</div>
   </body>
 </html>`;
 }
 
 /**
- * Builds the full legend webview HTML: the commit list (with swatches,
- * hashes, summaries, and authorship), the coloring-mode and palette
+ * Builds the full legend webview HTML: the commit list (cards with a swatch drawn
+ * like the editor decoration, with hash, author and date in the tooltip), the coloring-mode and palette
  * selectors, and the client-side script that posts selection changes back
  * to the extension and keeps the selected commit scrolled into view.
  */
@@ -94,27 +82,29 @@ export function buildLegendHtml(
   kindByCommit: Map<string, EventOriginKind> | null,
   coloringMode: VisualizationColoringMode,
   selectedPaletteValue: string,
-  selectedCommitHash: string | null = null
+  selectedCommitHash: string | null = null,
+  revision = "HEAD"
 ): string {
+  const now = Date.now();
   const items = commits.map((entry) => {
     const palette = paletteByCommit.get(entry.commitHash)!;
     const entryLabel = kindByCommit
       ? eventOriginLabel(kindByCommit.get(entry.commitHash) ?? "unknown")
       : rankLabel(entry.rank, entry.total);
-    const itemClass =
-      entry.commitHash === selectedCommitHash ? "item item-selected" : "item";
-    return `<div class="${itemClass}">
-      <div class="swatch" style="background:${palette.backgroundColor}; border-color:${palette.borderColor};"></div>
-      <div class="meta">
-        <div class="top">
-          <span class="hash">${escapeHtml(shortCommitHash(entry.commitHash))}</span>
-          <span class="rank">${escapeHtml(entryLabel)}</span>
+    const authorTime = entry.authorTime === null ? null : entry.authorTime * 1000;
+    const tooltip = `${shortCommitHash(entry.commitHash)} · ${authorTime === null ? "unknown date" : new Date(authorTime).toLocaleString()} · ${entry.author}
+${entry.summary}`;
+    const selected = entry.commitHash === selectedCommitHash ? " selected" : "";
+    return `<li class="entry${selected}" title="${escapeHtml(tooltip)}">
+      <span class="swatch" style="background:${palette.backgroundColor}; border-color:${palette.borderColor};"></span>
+      <div class="entry-body">
+        <div class="entry-top">
+          <span class="kind">${escapeHtml(commitTitle(entry.summary))}</span>
+          <span class="time">${escapeHtml(formatRelativeTime(authorTime, now))}</span>
         </div>
-        <div class="summary">${escapeHtml(entry.summary || "No summary")}</div>
-        <div class="detail">${escapeHtml(entry.author)} · ${escapeHtml(formatAuthorDate(entry.authorTime))}</div>
-        <div class="detail">${escapeHtml(lineLabel(entry.lineCount))}</div>
+        <div class="meta">${escapeHtml(entryLabel)} · ${escapeHtml(lineLabel(entry.lineCount))}</div>
       </div>
-    </div>`;
+    </li>`;
   });
 
   const modeOptionsHtml = COLORING_MODE_OPTIONS
@@ -137,111 +127,52 @@ export function buildLegendHtml(
   <head>
     <meta charset="UTF-8" />
     <style>
-      body {
-        font-family: var(--vscode-font-family);
-        color: var(--vscode-foreground);
-        background: var(--vscode-editor-background);
-        padding: 12px;
-      }
-      .header {
-        margin-bottom: 12px;
-      }
-      .title {
-        font-weight: 600;
-        margin-bottom: 4px;
-      }
-      .subtitle {
-        color: var(--vscode-descriptionForeground);
-        line-height: 1.4;
-        word-break: break-word;
-      }
-      .controls {
+${SHARED_WEBVIEW_CSS}
+      body { background: var(--vscode-editor-background); }
+      .entry {
         display: grid;
-        grid-template-columns: auto 1fr;
-        gap: 6px 8px;
-        align-items: center;
-        margin-top: 10px;
-      }
-      .controls label {
-        display: contents;
-      }
-      .controls label span {
-        color: var(--vscode-descriptionForeground);
-        font-size: 12px;
-        white-space: nowrap;
-      }
-      .controls select {
-        min-width: 0;
-        background: var(--vscode-input-background);
-        border: 1px solid var(--vscode-input-border);
-        color: var(--vscode-input-foreground);
-        font-size: 12px;
-        padding: 2px 6px;
-      }
-      .item {
-        display: grid;
-        grid-template-columns: 18px 1fr;
-        gap: 10px;
+        grid-template-columns: 16px 1fr;
+        gap: 8px;
         align-items: start;
-        padding: 8px 8px;
-        border-top: 1px solid var(--vscode-panel-border);
-        border-radius: 4px;
-      }
-      .item:first-of-type {
-        border-top: none;
-      }
-      .item-selected {
-        background: color-mix(in srgb, var(--vscode-list-activeSelectionBackground) 18%, transparent);
-        outline: 1px solid color-mix(in srgb, var(--vscode-list-activeSelectionForeground) 38%, transparent);
-        outline-offset: -1px;
-      }
-      .item-selected .hash,
-      .item-selected .summary {
-        color: var(--vscode-list-activeSelectionForeground);
-      }
-      .item-selected .rank,
-      .item-selected .detail {
-        color: color-mix(in srgb, var(--vscode-list-activeSelectionForeground) 82%, transparent);
+        border-left: none;
+        padding-left: 6px;
       }
       .swatch {
-        width: 18px;
-        height: 18px;
+        width: 14px;
+        height: 14px;
+        margin-top: 1px;
         border: 1px solid;
         border-radius: 4px;
+        box-sizing: border-box;
+      }
+      .entry-body { min-width: 0; }
+      .meta {
         margin-top: 2px;
+        font-size: 0.9em;
+        color: var(--vscode-foreground);
+        opacity: 0.8;
       }
-      .top {
-        display: flex;
-        gap: 8px;
-        align-items: baseline;
-        flex-wrap: wrap;
+      .entry.selected {
+        background: var(--vscode-list-activeSelectionBackground, var(--vscode-list-hoverBackground));
+        color: var(--vscode-list-activeSelectionForeground, var(--vscode-foreground));
+        outline: 1px solid var(--vscode-focusBorder);
+        outline-offset: -1px;
       }
-      .hash {
-        font-family: var(--vscode-editor-font-family);
-        font-size: 12px;
-      }
-      .rank, .detail, .subtitle {
-        font-size: 12px;
-      }
-      .rank, .detail {
-        color: var(--vscode-descriptionForeground);
-      }
-      .summary {
-        margin-top: 2px;
-        line-height: 1.35;
+      .entry.selected .time, .entry.selected .meta {
+        color: inherit;
       }
     </style>
   </head>
   <body>
-    <div class="header">
-      <div class="title">Edit History</div>
-      <div class="subtitle">${escapeHtml(path.basename(filePath))}</div>
-      <div class="controls">
-        <label><span>Coloring</span><select id="coloring-mode">${modeOptionsHtml}</select></label>
-        <label><span>Palette</span><select id="theme">${paletteOptionsHtml}</select></label>
-      </div>
-    </div>
-    ${items.join("")}
+    <header class="status">
+      <div class="state">Edit history</div>
+      <div class="row"><span class="label">File</span><code>${escapeHtml(path.basename(filePath))}</code></div>
+      <div class="row"><span class="label">Branch</span><span>${revision === "HEAD" ? "Checked-out branch" : `<code>${escapeHtml(revision)}</code>`}</span></div>
+      <div class="row"><label class="label" for="coloring-mode">Coloring</label><select id="coloring-mode">${modeOptionsHtml}</select></div>
+      <div class="row"><label class="label" for="theme">Palette</label><select id="theme">${paletteOptionsHtml}</select></div>
+    </header>
+    <h2><span>Commits</span><span class="count">${commits.length}</span></h2>
+    <ul class="entries">${items.join("")}</ul>
     <script>
       const vscode = acquireVsCodeApi();
       const modeSelect = document.getElementById("coloring-mode");
@@ -257,7 +188,7 @@ export function buildLegendHtml(
         });
       }
       requestAnimationFrame(() => {
-        const selectedItem = document.querySelector(".item-selected");
+        const selectedItem = document.querySelector(".entry.selected");
         if (selectedItem) {
           const rect = selectedItem.getBoundingClientRect();
           if (rect.top < 0) {

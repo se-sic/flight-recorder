@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import {
-  getRecordingBranchState,
+  getPanelBranchState,
   listUnfinishedRecordings,
   onRecordingHistoryChanged,
   recoverUnfinishedRecordings,
@@ -22,6 +22,8 @@ let pushInProgress = false;
 class RecordingHistoryViewProvider implements vscode.WebviewViewProvider {
   private view: vscode.WebviewView | null = null;
   private message: string | null = null;
+  /** The branch the panel currently shows, opened by "Show edit history in editor". */
+  private shownBranch: string | null = null;
 
   resolveWebviewView(webviewView: vscode.WebviewView): void {
     this.view = webviewView;
@@ -29,14 +31,16 @@ class RecordingHistoryViewProvider implements vscode.WebviewViewProvider {
       enableScripts: true,
     };
     webviewView.webview.onDidReceiveMessage((message: { type?: string }) => {
-      if (message.type === "refresh") {
-        void this.refresh();
-      }
-      if (message.type === "push") {
-        void vscode.commands.executeCommand("flightRecorder.pushTrackingBranch");
-      }
       if (message.type === "recover") {
         void vscode.commands.executeCommand("flightRecorder.recoverRecordings");
+      }
+      if (message.type === "visualize" && this.shownBranch) {
+        void vscode.commands.executeCommand("flightRecorder.editHistoryVisualization", this.shownBranch);
+      }
+    });
+    webviewView.onDidChangeVisibility(() => {
+      if (webviewView.visible) {
+        void this.refresh();
       }
     });
     void this.refresh();
@@ -48,21 +52,37 @@ class RecordingHistoryViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    const state = getRecordingBranchState();
+    const state = await getPanelBranchState();
     const branchName = state?.displayBranchName ?? null;
     const history = state && branchName
-      ? await readRecordingHistory(state.repoRoot, branchName, state.sourceBranchName)
+      ? await readRecordingHistory(state.repoRoot, branchName, state.sourceBranchName, state.finalBranchName)
       : null;
+    // The checked-out branch has never been recorded: show the start hint instead.
+    const hasNoRecording = !!state && !state.isRecording && state.commitMode === "trackingWorktree" && history === null;
+    this.shownBranch = history ? branchName : null;
     const unfinished = await listUnfinishedRecordings();
     this.view.webview.html = buildHtml(
-      state,
+      hasNoRecording ? null : state,
       history,
       this.message,
       unfinished.length,
-      this.view.webview.cspSource,
-      pushInProgress
+      this.view.webview.cspSource
     );
   }
+}
+
+/** Calls `onChange` when the checked-out branch changes, by watching the repository's `.git/HEAD`. */
+function watchCheckedOutBranch(onChange: () => void): vscode.Disposable {
+  const repoFolder = vscode.workspace.workspaceFolders?.[0];
+  if (!repoFolder) {
+    return new vscode.Disposable(() => undefined);
+  }
+  const watcher = vscode.workspace.createFileSystemWatcher(
+    new vscode.RelativePattern(repoFolder, ".git/HEAD")
+  );
+  watcher.onDidChange(onChange);
+  watcher.onDidCreate(onChange);
+  return watcher;
 }
 
 export function initializeRecordingHistoryPanel(
@@ -74,6 +94,9 @@ export function initializeRecordingHistoryPanel(
     onRecordingHistoryChanged(() => {
       void historyProvider?.refresh();
     }),
+    watchCheckedOutBranch(() => {
+      void historyProvider?.refresh();
+    }),
     vscode.commands.registerCommand("flightRecorder.refreshHistory", async () => {
       await historyProvider?.refresh();
     }),
@@ -81,7 +104,7 @@ export function initializeRecordingHistoryPanel(
       await recoverUnfinishedRecordings();
     }),
     vscode.commands.registerCommand("flightRecorder.copyTrackingBranch", async () => {
-      const state = getRecordingBranchState();
+      const state = await getPanelBranchState();
       const branch = state?.displayBranchName ?? state?.finalBranchName;
       if (!branch) {
         void vscode.window.showInformationMessage("No Flight Recorder branch is available yet.");
@@ -91,7 +114,7 @@ export function initializeRecordingHistoryPanel(
       void vscode.window.showInformationMessage(`Copied ${branch}.`);
     }),
     vscode.commands.registerCommand("flightRecorder.pushTrackingBranch", async () => {
-      const state = getRecordingBranchState();
+      const state = await getPanelBranchState();
       if (!state || state.commitMode !== "trackingWorktree" || !state.finalBranchName) {
         void vscode.window.showInformationMessage("No finalized Flight Recorder branch is available to push.");
         return;

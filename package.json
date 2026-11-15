@@ -53,7 +53,8 @@
       },
       {
         "command": "flightRecorder.refreshHistory",
-        "title": "Flight Recorder: Refresh Recording History"
+        "title": "Flight Recorder: Refresh Recording History",
+        "icon": "$(refresh)"
       },
       {
         "command": "flightRecorder.pushTrackingBranch",
@@ -61,7 +62,8 @@
       },
       {
         "command": "flightRecorder.copyTrackingBranch",
-        "title": "Flight Recorder: Copy Recording Branch Name"
+        "title": "Flight Recorder: Copy Recording Branch Name",
+        "icon": "$(copy)"
       },
       {
         "command": "flightRecorder.recoverRecordings",
@@ -87,6 +89,18 @@
       ]
     },
     "menus": {
+      "view/title": [
+        {
+          "command": "flightRecorder.copyTrackingBranch",
+          "when": "view == flightRecorder.historyView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "flightRecorder.refreshHistory",
+          "when": "view == flightRecorder.historyView",
+          "group": "navigation@2"
+        }
+      ],
       "editor/title": [
         {
           "command": "flightRecorder.start",

@@ -81,6 +81,27 @@ test("readRecordingHistory hides the source branch history the recording started
   assert.equal(unfiltered?.entries.length, 3);
 });
 
+test("readRecordingHistory marks commits that are not on the saved branch yet", async () => {
+  const repo = makeRepo();
+  const ACTIVE = "flight-recorder-active/main/s1";
+  git(repo, "checkout", "-q", "-b", ACTIVE);
+  commitEmpty(repo, "first recording");
+  git(repo, "branch", BRANCH);
+  commitEmpty(repo, "running recording");
+  git(repo, "checkout", "-q", "main");
+
+  const history = await readRecordingHistory(repo, ACTIVE, "main", BRANCH);
+  assert.deepEqual(
+    history?.entries.map((entry) => [entry.subject, entry.saved]),
+    [["running recording", false], ["first recording", true]]
+  );
+
+  // Before the first recording is saved, nothing is on the saved branch.
+  git(repo, "branch", "-D", BRANCH);
+  const unsaved = await readRecordingHistory(repo, ACTIVE, "main", BRANCH);
+  assert.deepEqual(unsaved?.entries.map((entry) => entry.saved), [false, false]);
+});
+
 test("readRecordingHistory returns null for a missing branch", async () => {
   const repo = makeRepo();
   assert.equal(await readRecordingHistory(repo, BRANCH), null);
