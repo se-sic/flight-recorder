@@ -1,7 +1,9 @@
+import * as crypto from "crypto";
 import { normalizePath } from "../../../utils/fs-path";
 import {
   AssistantCapability,
   AssistantEvent,
+  AttributionEvidence,
   FileOperation,
 } from "../../event";
 
@@ -36,6 +38,85 @@ const READ_ONLY_TOOLS = new Set([
 ]);
 
 type ClaudeTranscriptEntry = Record<string, unknown>;
+
+/** Hashes text the same way the staging tracker hashes inserted editor text. */
+function hashText(text: string): string {
+  return crypto.createHash("sha256").update(text).digest("hex");
+}
+
+/**
+ * Returns the lines of `next` that replace lines of `previous`, joined with a
+ * trailing newline: the text VS Code reports as inserted when it reloads a
+ * file changed on disk, which diffs whole lines.
+ */
+function addedLinesText(previous: string, next: string): string | null {
+  const oldLines = previous.split("\n");
+  const newLines = next.split("\n");
+  let prefix = 0;
+  while (prefix < oldLines.length && prefix < newLines.length && oldLines[prefix] === newLines[prefix]) {
+    prefix++;
+  }
+  let suffix = 0;
+  while (
+    suffix < oldLines.length - prefix &&
+    suffix < newLines.length - prefix &&
+    oldLines[oldLines.length - 1 - suffix] === newLines[newLines.length - 1 - suffix]
+  ) {
+    suffix++;
+  }
+  const added = newLines.slice(prefix, newLines.length - suffix);
+  return added.length > 0 ? added.join("\n") + "\n" : null;
+}
+
+/**
+ * Builds text evidence for a Claude file-edit tool from its input: hashes of
+ * the new text as written and of the whole lines it adds, so the staging
+ * tracker can match them against the editor's observed changes.
+ */
+function editToolEvidence(
+  toolName: string,
+  toolInput: Record<string, unknown> | undefined,
+  sessionId: string | undefined,
+  timestamp: string
+): AttributionEvidence[] {
+  if (!toolInput) {
+    return [];
+  }
+  const pairs: Array<[string, string]> = [];
+  const pushPair = (edit: unknown) => {
+    const { old_string: before, new_string: after } = (edit ?? {}) as Record<string, unknown>;
+    if (typeof after === "string" && after.length > 0) {
+      pairs.push([typeof before === "string" ? before : "", after]);
+    }
+  };
+  if (toolName === "Edit") {
+    pushPair(toolInput);
+  } else if (toolName === "MultiEdit" && Array.isArray(toolInput.edits)) {
+    toolInput.edits.forEach(pushPair);
+  } else if (toolName === "Write" && typeof toolInput.content === "string" && toolInput.content.length > 0) {
+    pairs.push(["", toolInput.content]);
+  }
+
+  const hashes = new Set<string>();
+  for (const [before, after] of pairs) {
+    hashes.add(hashText(after));
+    const added = addedLinesText(before, after);
+    if (added) {
+      hashes.add(hashText(added));
+    }
+  }
+  if (hashes.size === 0) {
+    return [];
+  }
+  return collectStringPaths(toolInput).map((filePath) => ({
+    type: "claude-tool-input",
+    confidence: "high",
+    sessionId,
+    path: filePath,
+    timestamp,
+    details: { editTextHashes: Array.from(hashes) },
+  }));
+}
 
 /** Extracts and resolves file path strings from a tool input value, checking common path-like field names and a `file_paths` array. */
 function collectStringPaths(input: unknown): string[] {
@@ -287,6 +368,7 @@ export class ClaudeCodeParser {
           sessionId: payload.session_id,
           toolName,
           origin: "assistant-tool-edit",
+          evidence: editToolEvidence(toolName, payload.tool_input, payload.session_id, timestamp),
           metadata: {
             transcriptPath: payload.transcript_path,
             cwd: payload.cwd,
@@ -313,6 +395,7 @@ export class ClaudeCodeParser {
           sessionId: payload.session_id,
           toolName,
           origin: "assistant-tool-edit",
+          evidence: editToolEvidence(toolName, payload.tool_input, payload.session_id, timestamp),
           metadata: {
             transcriptPath: payload.transcript_path,
             cwd: payload.cwd,
@@ -510,6 +593,7 @@ export class ClaudeCodeParser {
           sessionId,
           toolName,
           origin: "assistant-tool-edit",
+          evidence: editToolEvidence(toolName, toolInput, sessionId, timestampValue),
           metadata: toolInput ? { toolInput } : undefined,
         });
         continue;

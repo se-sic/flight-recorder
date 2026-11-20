@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import * as path from "node:path";
 import test from "node:test";
 import { ClaudeCodeParser } from "../src/recording/agents/claude/parser";
+import { FineGrainedStagingTracker, hashInsertedText } from "../src/recording/staging-tracker";
 
 // The parser resolves paths, so on Windows this becomes C:\Users\test\...
 const APP_PATH = path.resolve("/Users/test/demo/src/app.ts");
@@ -318,4 +319,85 @@ test("ClaudeCodeParser treats Stop and UserPromptSubmit as the end of all runnin
       ["read-only", { phase: "finished" }],
     ]
   );
+});
+
+const EDIT_INPUT = {
+  file_path: "/Users/test/demo/src/app.ts",
+  old_string: "export const a = 1;",
+  new_string: "// The answer\nexport const a = 1;",
+};
+
+test("Claude Edit hooks carry hashes of the new text and of the whole lines it adds", () => {
+  const [pre, post] = parseHooks(
+    { session_id: "s1", hook_event_name: "PreToolUse", tool_name: "Edit", tool_input: EDIT_INPUT },
+    { session_id: "s1", hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: EDIT_INPUT, tool_response: { filePath: EDIT_INPUT.file_path } }
+  );
+
+  for (const event of [pre, post]) {
+    assert.equal(event.evidence?.length, 1);
+    assert.equal(event.evidence?.[0].path, APP_PATH);
+    assert.deepEqual(event.evidence?.[0].details?.editTextHashes, [
+      hashInsertedText(EDIT_INPUT.new_string),
+      hashInsertedText("// The answer\n"),
+    ]);
+  }
+});
+
+test("Claude MultiEdit and Write hooks carry evidence; Bash and Read carry none", () => {
+  const [multi, write, bash, read] = parseHooks(
+    {
+      hook_event_name: "PreToolUse",
+      tool_name: "MultiEdit",
+      tool_input: { file_path: EDIT_INPUT.file_path, edits: [{ old_string: "a", new_string: "b" }, { old_string: "c", new_string: "d" }] },
+    },
+    { hook_event_name: "PreToolUse", tool_name: "Write", tool_input: { file_path: EDIT_INPUT.file_path, content: "x\n" } },
+    { hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "ls" } },
+    { hook_event_name: "PreToolUse", tool_name: "Read", tool_input: { file_path: EDIT_INPUT.file_path } }
+  );
+
+  assert.equal((multi.evidence?.[0].details?.editTextHashes as string[]).length, 4);
+  assert.ok((write.evidence?.[0].details?.editTextHashes as string[]).includes(hashInsertedText("x\n")));
+  assert.equal(bash.evidence, undefined);
+  assert.equal(read.evidence, undefined);
+});
+
+test("a Claude edit of an open file is attributed with high confidence when the editor reports the added lines", () => {
+  const [pre, post] = parseHooks(
+    { session_id: "s1", hook_event_name: "PreToolUse", tool_name: "Edit", tool_input: EDIT_INPUT },
+    { session_id: "s1", hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: EDIT_INPUT, tool_response: { filePath: EDIT_INPUT.file_path } }
+  );
+  const tracker = new FineGrainedStagingTracker(1_000);
+
+  tracker.recordAssistantEvent(pre, 2_000);
+  // VS Code reloads the changed file and reports the inserted line.
+  tracker.recordTextDocumentChange(
+    [{
+      path: APP_PATH,
+      insertedTextHashes: [hashInsertedText("// The answer\n")],
+      insertedTextLength: 14,
+      ranges: [{ startLine: 0, startColumn: 0, endLine: 0, endColumn: 0 }],
+    }],
+    2_003
+  );
+  tracker.recordAssistantEvent(post, 2_005);
+
+  const commit = tracker.flushAssistantWindowIfIdle(5_000);
+  assert.ok(commit && commit.kind === "assistant");
+  assert.equal(commit.fileAttributions[0].confidence, "high");
+  assert.equal(commit.fileAttributions[0].matched, true);
+});
+
+test("a Claude edit of a closed file gets medium confidence from its evidence", () => {
+  const [pre, post] = parseHooks(
+    { hook_event_name: "PreToolUse", tool_name: "Edit", tool_input: EDIT_INPUT },
+    { hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: EDIT_INPUT, tool_response: { filePath: EDIT_INPUT.file_path } }
+  );
+  const tracker = new FineGrainedStagingTracker(1_000);
+
+  tracker.recordAssistantEvent(pre, 2_000);
+  tracker.recordAssistantEvent(post, 2_005);
+
+  const commit = tracker.flushAssistantWindowIfIdle(5_000);
+  assert.ok(commit && commit.kind === "assistant");
+  assert.equal(commit.fileAttributions[0].confidence, "medium");
 });
