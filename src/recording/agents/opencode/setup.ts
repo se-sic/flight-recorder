@@ -2,6 +2,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
 import { addGitExcludeEntries } from "../../../utils/git-exclude";
+import { normalizePath } from "../../../utils/fs-path";
 import { getWorkspaceRepoRoot } from "../../../utils/paths";
 import { EXTENSION_NAME } from "../../../utils/constants";
 import { getOpenCodeLogPath, getOpenCodePluginPath } from "./config";
@@ -45,7 +46,7 @@ export async function configureOpenCodePlugin(): Promise<void> {
 
   try {
     fs.mkdirSync(path.dirname(pluginPath), { recursive: true });
-    fs.writeFileSync(pluginPath, buildOpenCodePluginSource(path.resolve(repoRoot)), "utf8");
+    fs.writeFileSync(pluginPath, buildOpenCodePluginSource(normalizePath(repoRoot)), "utf8");
     fs.mkdirSync(path.dirname(logPath), { recursive: true });
     if (!fs.existsSync(logPath)) {
       fs.writeFileSync(logPath, "", "utf8");

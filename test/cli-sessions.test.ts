@@ -11,6 +11,7 @@ import {
   parseCopilotCliWorkspace,
 } from "../src/recording/agents/copilot/cli-sessions";
 import type { AssistantEvent } from "../src/recording/event";
+import { normalizePath } from "../src/utils/fs-path";
 
 function toolStart(id: string, toolName: string, args: unknown): string {
   return JSON.stringify({
@@ -69,10 +70,9 @@ test("findCopilotCliSessionsForRepo matches sessions by cwd or git_root", async 
 
 test("CopilotCliEventParser emits events for successful edit tools only", () => {
   const parser = new CopilotCliEventParser("session-1");
-  // The CLI reports upper-case drive letters; VS Code uses lower-case ones.
-  const vscodePath = (p: string) => p.replace(/^[A-Z]:/, (d) => d.toLowerCase());
-  const file = vscodePath(path.resolve("repo", "src", "main.py"));
-  const cliFile = file.replace(/^[a-z]:/, (d) => d.toUpperCase());
+  // Parsed paths are normalized (upper-case drive letter), whatever the CLI reports.
+  const file = normalizePath("repo", "src", "main.py");
+  const cliFile = file.replace(/^[A-Z]:/, (d) => d.toLowerCase());
   const patch = `*** Begin Patch\n*** Update File: ${cliFile}\n@@\n-a\n+b\n*** End Patch\n`;
 
   const input =
@@ -94,7 +94,7 @@ test("CopilotCliEventParser emits events for successful edit tools only", () => 
   assert.equal(events.length, 2);
   assert.equal(events[0].toolName, "create");
   assert.deepEqual(events[0].fileOperations, [
-    { kind: "create", path: vscodePath(path.resolve("new.py")) },
+    { kind: "create", path: normalizePath("new.py") },
   ]);
   assert.equal(events[1].toolName, "apply_patch");
   assert.deepEqual(events[1].fileOperations, [{ kind: "update", path: file }]);

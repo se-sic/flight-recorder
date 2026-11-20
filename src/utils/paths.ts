@@ -1,19 +1,24 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
+import { uriToPath } from "./fs-path";
 export { CHAT_EXPORT_PATH, LOG_EXPORT_PATH } from "./constants";
 
 const EXTHOST_DIR_PATTERN = /^exthost\d*$/i;
 
+/** Returns the first opened workspace folder's normalized path, or null if none is open. */
+export function workspaceRootPath(): string | null {
+  const repoFolder = vscode.workspace.workspaceFolders?.[0];
+  return repoFolder ? uriToPath(repoFolder.uri) : null;
+}
+
 /** Returns the first opened workspace folder's path, showing an error and returning null if none is open. */
 export function getWorkspaceRepoRoot(errorMessage: string): string | null {
-  const repoFolder = vscode.workspace.workspaceFolders?.[0];
-  if (!repoFolder) {
+  const repoRoot = workspaceRootPath();
+  if (!repoRoot) {
     vscode.window.showErrorMessage(errorMessage);
-    return null;
   }
-
-  return repoFolder.uri.fsPath;
+  return repoRoot;
 }
 
 /**
@@ -24,7 +29,7 @@ export function getWorkspaceRepoRoot(errorMessage: string): string | null {
 export function getWindowLogDirFromContext(
   context: vscode.ExtensionContext
 ): string | null {
-  let cur = context.logUri.fsPath;
+  let cur = uriToPath(context.logUri);
 
   // Walk up until we find a folder containing an extension-host log
   // directory. Desktop VS Code names it "exthost1"; other builds have used
@@ -58,7 +63,7 @@ export function getWindowLogDirFromContext(
 export async function getCopilotLogFile(
   logDir: vscode.Uri
 ): Promise<string | null> {
-  const exthostDir = logDir.fsPath;
+  const exthostDir = uriToPath(logDir);
   if (!fs.existsSync(exthostDir)) return null;
 
   const extDirs = ["GitHub.copilot-chat", "GitHub.copilot"];

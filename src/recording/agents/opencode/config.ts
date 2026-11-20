@@ -1,5 +1,5 @@
-import * as path from "path";
 import * as vscode from "vscode";
+import { normalizePath } from "../../../utils/fs-path";
 import {
   OPENCODE_LOG_RELATIVE_PATH,
   OPENCODE_PLUGIN_RELATIVE_PATH,
@@ -18,10 +18,10 @@ export function getOpenCodeMissingSourceBehavior(): OpenCodeMissingSourceBehavio
 
 /** Resolves the absolute path of the generated OpenCode plugin for a repository. */
 export function getOpenCodePluginPath(repoRoot: string): string {
-  return path.resolve(repoRoot, OPENCODE_PLUGIN_RELATIVE_PATH);
+  return normalizePath(repoRoot, OPENCODE_PLUGIN_RELATIVE_PATH);
 }
 
 /** Resolves the absolute path of the JSONL log the OpenCode plugin writes for a repository. */
 export function getOpenCodeLogPath(repoRoot: string): string {
-  return path.resolve(repoRoot, OPENCODE_LOG_RELATIVE_PATH);
+  return normalizePath(repoRoot, OPENCODE_LOG_RELATIVE_PATH);
 }

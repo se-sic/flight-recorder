@@ -1,4 +1,4 @@
-import * as path from "path";
+import { normalizePath } from "../../../utils/fs-path";
 import {
   AssistantCapability,
   AssistantEvent,
@@ -40,7 +40,7 @@ type ClaudeTranscriptEntry = Record<string, unknown>;
 /** Extracts and resolves file path strings from a tool input value, checking common path-like field names and a `file_paths` array. */
 function collectStringPaths(input: unknown): string[] {
   if (typeof input === "string" && input.trim()) {
-    return [path.resolve(input)];
+    return [normalizePath(input)];
   }
 
   if (typeof input !== "object" || input === null) {
@@ -63,14 +63,14 @@ function collectStringPaths(input: unknown): string[] {
   ]) {
     const value = inputObj[key];
     if (typeof value === "string" && value.trim()) {
-      filePaths.add(path.resolve(value));
+      filePaths.add(normalizePath(value));
     }
   }
 
   if (Array.isArray(inputObj.file_paths)) {
     for (const candidate of inputObj.file_paths) {
       if (typeof candidate === "string" && candidate.trim()) {
-        filePaths.add(path.resolve(candidate));
+        filePaths.add(normalizePath(candidate));
       }
     }
   }
@@ -137,7 +137,7 @@ function mapHookFileChangedOperation(payload: ClaudeHookEventPayload): FileOpera
     return [];
   }
 
-  const resolved = path.resolve(payload.file_path);
+  const resolved = normalizePath(payload.file_path);
   switch (payload.event) {
     case "add":
       return [{ kind: "create", path: resolved }];
@@ -172,7 +172,7 @@ function mapHookToolResponseOperation(
     return inferFileOperationsFromTool(fallbackToolName, fallbackToolInput);
   }
 
-  const resolved = path.resolve(responseFilePath);
+  const resolved = normalizePath(responseFilePath);
   const responseType =
     typeof toolResponse?.type === "string" ? toolResponse.type : undefined;
 
@@ -443,7 +443,7 @@ export class ClaudeCodeParser {
         fileOperations: [
           {
             kind: inferOperationKindFromToolResult(toolUseResult),
-            path: path.resolve(toolResultFilePath),
+            path: normalizePath(toolResultFilePath),
           },
         ],
         sessionId,

@@ -8,6 +8,7 @@ import {
 } from "./repository";
 import { getLogChannel } from "../utils/logging";
 import { getWorkspaceRepoRoot } from "../utils/paths";
+import { uriToPath } from "../utils/fs-path";
 import { EXTENSION_NAME } from "../utils/constants";
 
 /** Opens the git-filter-repo installation guide in the user's default browser. */
@@ -24,7 +25,7 @@ async function ensureGitFilterRepoDependency(
   context: vscode.ExtensionContext
 ): Promise<string | null> {
   const output = getLogChannel();
-  const globalStoragePath = context.globalStorageUri.fsPath;
+  const globalStoragePath = uriToPath(context.globalStorageUri);
   const availability = await checkGitFilterRepoAvailable(globalStoragePath);
   if (availability.ok) {
     return availability.executablePath;

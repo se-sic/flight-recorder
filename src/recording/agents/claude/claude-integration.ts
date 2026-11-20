@@ -2,6 +2,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
 import { ClaudeCodeParser } from "./parser";
+import { samePath } from "../../../utils/fs-path";
 import {
   AssistantIntegration,
   AssistantIntegrationReady,
@@ -95,7 +96,7 @@ function transcriptBelongsToRepo(filePath: string, repoRoot: string): boolean {
 
       const cwd = (parsed as { cwd?: unknown }).cwd;
       if (typeof cwd === "string") {
-        return path.resolve(cwd) === path.resolve(repoRoot);
+        return samePath(cwd, repoRoot);
       }
     }
   } catch {

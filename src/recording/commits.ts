@@ -6,6 +6,12 @@ import {
   WindowCommit,
 } from "./staging-tracker";
 import { gitCmd, GitCommandResult } from "../utils/git";
+import {
+  normalizePath,
+  realDirectoryPath,
+  relativePathInside,
+  samePath,
+} from "../utils/fs-path";
 import { LOG_EXPORT_PATH } from "../utils/constants";
 
 export type GitFailureKind =
@@ -291,7 +297,13 @@ function createTrackingSessionId(): string {
   return sanitizeRefSegment(`${stamp}-${suffix}`);
 }
 
-async function readSourceBranchName(repoRoot: string): Promise<string> {
+/** Returns the name of the finalized recording branch for a source branch, e.g. `flight-recorder/main`. */
+export function recordingBranchName(sourceBranchName: string, trackingBranchPrefix: string): string {
+  return `${sanitizeTrackingBranchPrefix(trackingBranchPrefix)}/${sanitizeRefSegment(sourceBranchName)}`;
+}
+
+/** Returns the checked-out branch, or `detached-<hash>` for a detached HEAD. */
+export async function readSourceBranchName(repoRoot: string): Promise<string> {
   const branch = await gitCmd(["branch", "--show-current"], repoRoot);
   const currentBranch = branch.out.trim();
   if (branch.code === 0 && currentBranch.length > 0) {
@@ -315,7 +327,7 @@ async function readCommonGitDir(repoRoot: string): Promise<GitCommandResult> {
   const rawPath = res.out.trim();
   res.out = path.isAbsolute(rawPath)
     ? rawPath
-    : path.resolve(repoRoot, rawPath);
+    : normalizePath(repoRoot, rawPath);
   return res;
 }
 
@@ -343,7 +355,7 @@ export async function prepareRecordingCommitTarget(
   | { ok: true; target: RecordingCommitTarget }
   | { ok: false; kind: GitFailureKind; msg: string; err: string }
 > {
-  const sourceRoot = path.resolve(repoRoot);
+  const sourceRoot = normalizePath(repoRoot);
   if (options.mode === "currentBranch") {
     return {
       ok: true,
@@ -369,7 +381,7 @@ export async function prepareRecordingCommitTarget(
   const sourceBranchName = await readSourceBranchName(sourceRoot);
   const prefix = sanitizeTrackingBranchPrefix(options.trackingBranchPrefix);
   const sourceBranchSegment = sanitizeRefSegment(sourceBranchName);
-  const finalBranchName = `${prefix}/${sourceBranchSegment}`;
+  const finalBranchName = recordingBranchName(sourceBranchName, options.trackingBranchPrefix);
   const sessionId = createTrackingSessionId();
   const activeBranchName = `${activeBranchNamespace(prefix)}${sourceBranchSegment}/${sessionId}`;
   const commonGitDir = await readCommonGitDir(sourceRoot);
@@ -501,19 +513,9 @@ async function isAncestor(
   return res.code === 0;
 }
 
-/** Resolves symlinks (e.g. macOS /var → /private/var) so paths from git and from Node compare equal. */
-function canonicalPath(candidate: string): string {
-  try {
-    return fs.realpathSync(candidate);
-  } catch {
-    return path.resolve(candidate);
-  }
-}
-
-/** Returns whether `candidate` is `parent` itself or lies inside it. */
+/** Returns whether directory `candidate` is `parent` itself or lies inside it, resolving symlinks in both. */
 function isPathInside(candidate: string, parent: string): boolean {
-  const rel = path.relative(canonicalPath(parent), canonicalPath(candidate));
-  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+  return relativePathInside(realDirectoryPath(parent), realDirectoryPath(candidate)) !== null;
 }
 
 /** Lists the repository's worktrees with the short branch name each one has checked out. */
@@ -600,7 +602,7 @@ export async function listPendingTrackingSessions(
   repoRoot: string,
   trackingBranchPrefix: string
 ): Promise<PendingTrackingSession[]> {
-  const sourceRoot = path.resolve(repoRoot);
+  const sourceRoot = normalizePath(repoRoot);
   const prefix = sanitizeTrackingBranchPrefix(trackingBranchPrefix);
   const namespaces = [activeBranchNamespace(prefix), legacyActiveBranchNamespace(prefix)];
   const refs = await gitCmd(
@@ -735,7 +737,7 @@ async function finalizeTrackingSession(
     const holder = (await listWorktrees(sourceRoot)).find(
       (worktree) =>
         worktree.branchName === finalBranchName &&
-        (!worktreePath || canonicalPath(worktree.path) !== canonicalPath(worktreePath))
+        (!worktreePath || !samePath(realDirectoryPath(worktree.path), realDirectoryPath(worktreePath)))
     );
     if (holder) {
       return fail(
@@ -929,7 +931,7 @@ export async function listAllChangedFiles(repoRoot: string): Promise<string[]> {
 }
 
 function createCurrentBranchTarget(repoRoot: string): RecordingCommitTarget {
-  const resolved = path.resolve(repoRoot);
+  const resolved = normalizePath(repoRoot);
   return {
     mode: "currentBranch",
     sourceRoot: resolved,
@@ -1150,7 +1152,7 @@ async function stageAndCommit(
     // recording branch decide what changed. Comparing with the visible HEAD
     // instead would miss reverts and files that exist only on the branch.
     const snapshotFor = (rel: string) =>
-      snapshots?.[path.resolve(target.sourceRoot, rel)];
+      snapshots?.[normalizePath(target.sourceRoot, rel)];
     const candidates = addAll
       ? Array.from(new Set([...relFiles, ...(await listAllChangedFiles(target.sourceRoot))]))
       : relFiles;
@@ -1298,18 +1300,18 @@ export async function commitTrackedWindow(
   target?: RecordingCommitTarget
 ): Promise<GitActionResult> {
   const commitTarget = targetOrDefault(repoRoot, target);
-  const absRepo = path.resolve(repoRoot);
+  // Relative paths here keep native separators; git accepts both.
   const relFiles = Array.from(
     new Set(
       commit.files
-        .map((filePath) => path.resolve(filePath))
-        .filter((abs) => abs === absRepo || abs.startsWith(absRepo + path.sep))
-        .map((abs) => path.relative(repoRoot, abs))
+        .map((filePath) => relativePathInside(repoRoot, filePath))
+        .filter((rel): rel is string => !!rel)
+        .map((rel) => rel.split("/").join(path.sep))
     )
   );
 
   const snapshots = commit.kind === "human" ? commit.snapshots : undefined;
-  const hasSnapshot = (rel: string) => snapshots?.[path.resolve(repoRoot, rel)] !== undefined;
+  const hasSnapshot = (rel: string) => snapshots?.[normalizePath(repoRoot, rel)] !== undefined;
   // Ignored files (e.g. `.env`) are never recorded; staging them would also
   // fail the whole commit. Transient files (created and removed again within
   // the window) are left out too, unless an editor snapshot holds their text.
@@ -1320,8 +1322,8 @@ export async function commitTrackedWindow(
   const stageableFiles = notIgnored.filter((rel) => present.has(rel) || hasSnapshot(rel));
 
   // The commit metadata lists only what is actually recorded.
-  const recorded = new Set(stageableFiles.map((rel) => path.resolve(repoRoot, rel)));
-  const isRecorded = (filePath: string) => recorded.has(path.resolve(filePath));
+  const recorded = new Set(stageableFiles.map((rel) => normalizePath(repoRoot, rel)));
+  const isRecorded = (filePath: string) => recorded.has(normalizePath(filePath));
   const recordedCommit: WindowCommit = commit.kind === "assistant"
     ? {
       ...commit,
@@ -1377,7 +1379,7 @@ async function commitWithSnapshots(
 
     for (const rel of relFiles) {
       const gitPath = rel.split(path.sep).join("/");
-      const snapshot = snapshots[path.resolve(repoRoot, rel)];
+      const snapshot = snapshots[normalizePath(repoRoot, rel)];
       if (snapshot === undefined) {
         if ((await withoutUnknownMissingPaths(repoRoot, [rel])).length === 0) {
           continue;

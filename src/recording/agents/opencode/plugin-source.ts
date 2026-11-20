@@ -2,7 +2,7 @@
  * Version of the JSONL record format written by the generated plugin. Bump it
  * whenever the plugin source changes so existing installs are flagged as stale.
  */
-export const OPENCODE_PLUGIN_SCHEMA_VERSION = 2;
+export const OPENCODE_PLUGIN_SCHEMA_VERSION = 3;
 
 /** Repo-relative path of the generated plugin (OpenCode auto-loads `.opencode/plugins/*.ts`). */
 export const OPENCODE_PLUGIN_RELATIVE_PATH = ".opencode/plugins/flight-recorder.ts";
@@ -51,9 +51,16 @@ function record(kind, fields) {
   }
 }
 
+// Windows paths may differ in drive-letter (or other) case between OpenCode and VS Code.
+const WINDOWS = process.platform === "win32"
+const ROOT = WINDOWS ? REPO_ROOT.toLowerCase() : REPO_ROOT
+
 function insideRepo(directory) {
-  return typeof directory === "string" &&
-    (directory === REPO_ROOT || directory.startsWith(REPO_ROOT + "/") || directory.startsWith(REPO_ROOT + "\\\\"))
+  if (typeof directory !== "string") {
+    return false
+  }
+  const dir = WINDOWS ? directory.toLowerCase() : directory
+  return dir === ROOT || dir.startsWith(ROOT + "/") || dir.startsWith(ROOT + "\\\\")
 }
 
 function call(e) {

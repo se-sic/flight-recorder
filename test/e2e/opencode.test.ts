@@ -111,7 +111,7 @@ suite("OpenCode plugin recording", () => {
   test("Configure OpenCode Plugin installs the plugin and keeps git status clean", async () => {
     const root = repoRoot();
     assert.ok(fs.existsSync(path.join(root, PLUGIN)));
-    assert.match(fs.readFileSync(path.join(root, PLUGIN), "utf8"), /flight-recorder-plugin-schema: 2/);
+    assert.match(fs.readFileSync(path.join(root, PLUGIN), "utf8"), /flight-recorder-plugin-schema: 3/);
     const exclude = fs.readFileSync(path.join(root, ".git", "info", "exclude"), "utf8");
     assert.match(exclude, /\.opencode\/plugins\/flight-recorder\.ts/);
     assert.match(exclude, /\.opencode\/flight-recorder-events\.jsonl/);

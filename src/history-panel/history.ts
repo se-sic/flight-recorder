@@ -9,6 +9,8 @@ export type RecordingHistoryEntry = {
   kind: "human" | "assistant" | "log" | "chat" | "unknown";
   files: string[];
   origins: string[];
+  /** Whether the commit is on the saved recording branch; false while it only exists on the running recording's branch. */
+  saved: boolean;
 };
 
 export type RecordingHistory = {
@@ -96,6 +98,7 @@ function parseHistoryEntry(record: string): RecordingHistoryEntry | null {
     kind: classifySubject(subject),
     files: stringArray(metadata?.files),
     origins: stringArray(metadata?.origins),
+    saved: true,
   };
 }
 
@@ -150,10 +153,16 @@ async function readAheadBehind(
   };
 }
 
+/**
+ * Reads the recording commits on `branchName`, newest first. With
+ * `savedBranchName` (the finalized recording branch), commits not on that
+ * branch yet, i.e. those of a running recording, are marked as unsaved.
+ */
 export async function readRecordingHistory(
   repoRoot: string,
   branchName: string,
   sourceBranchName?: string,
+  savedBranchName?: string,
   limit = 50
 ): Promise<RecordingHistory | null> {
   if (!(await branchExists(repoRoot, branchName))) {
@@ -181,17 +190,36 @@ export async function readRecordingHistory(
     return null;
   }
 
+  const unsaved = await readUnsavedCommits(repoRoot, branchName, savedBranchName);
   const upstream = await readUpstream(repoRoot, branchName);
   const { ahead, behind } = await readAheadBehind(repoRoot, branchName, upstream);
   return {
     branchName,
     entries: splitLogRecords(log.out)
       .map(parseHistoryEntry)
-      .filter((entry): entry is RecordingHistoryEntry => entry !== null),
+      .filter((entry): entry is RecordingHistoryEntry => entry !== null)
+      .map((entry) => ({ ...entry, saved: !unsaved.has(entry.hash) })),
     upstream,
     ahead,
     behind,
   };
+}
+
+/** Returns the hashes of commits on `branchName` that are not on `savedBranchName` (all of them if it does not exist yet). */
+async function readUnsavedCommits(
+  repoRoot: string,
+  branchName: string,
+  savedBranchName?: string
+): Promise<Set<string>> {
+  if (!savedBranchName || savedBranchName === branchName) {
+    return new Set();
+  }
+  const savedExists = await branchExists(repoRoot, savedBranchName);
+  const res = await gitCmd(
+    ["rev-list", branchName, ...(savedExists ? ["--not", `refs/heads/${savedBranchName}`] : []), "--"],
+    repoRoot
+  );
+  return new Set(res.code === 0 ? res.out.split("\n").map((line) => line.trim()).filter(Boolean) : []);
 }
 
 async function readRemotes(repoRoot: string): Promise<string[]> {

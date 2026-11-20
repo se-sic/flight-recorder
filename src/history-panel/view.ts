@@ -1,104 +1,107 @@
 import * as crypto from "crypto";
 import type { RecordingBranchUiState } from "../recording/session";
 import { RecordingHistory, RecordingHistoryEntry } from "./history";
+import { escapeHtml, formatRelativeTime, SHARED_WEBVIEW_CSS } from "../utils/webview";
 
-/** Escapes text for safe use in HTML content and attributes. */
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
+const MAX_FILE_CHIPS = 4;
 
-/** Formats an ISO date for display, tolerating invalid input. */
-function formatDate(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return "unknown time";
-  }
-  return date.toLocaleString();
+/** Turns an origin like `assistant-tool-edit` into `tool edit`. */
+function originLabel(origin: string): string {
+  return origin.replace(/^assistant-/, "").replace(/-/g, " ");
 }
 
 /** Returns the card heading for a history entry. */
 function kindLabel(entry: RecordingHistoryEntry): string {
   switch (entry.kind) {
     case "human":
-      return "Human";
+      return "Human edit";
     case "assistant":
       return entry.origins.length > 0
-        ? `Assistant: ${entry.origins.join(", ")}`
-        : "Assistant";
+        ? `Assistant · ${entry.origins.map(originLabel).join(", ")}`
+        : "Assistant edit";
     case "log":
-      return "Log snapshot";
+      return "Assistant log";
     case "chat":
       return "Chat export";
     case "unknown":
     default:
-      return "Other";
+      return entry.subject;
   }
 }
 
-/** Summarizes an entry's files as one label. */
-function fileLabel(files: string[]): string {
-  if (files.length === 0) {
-    return "No file metadata";
-  }
-  if (files.length === 1) {
-    return files[0];
-  }
-  return `${files.length} files`;
-}
-
-/** Renders one history entry as a card. */
-function buildEntryHtml(entry: RecordingHistoryEntry): string {
-  const filePreview = entry.files.slice(0, 4)
-    .map((file) => `<span class="file">${escapeHtml(file)}</span>`)
+/** Renders one history entry as a card; details that are the same for every entry go into its tooltip. */
+function buildEntryHtml(entry: RecordingHistoryEntry, now: number): string {
+  const tooltip = `${entry.shortHash} · ${new Date(entry.authorDate).toLocaleString()} · ${entry.author || "unknown author"}\n${entry.subject}`;
+  const chips = entry.files.slice(0, MAX_FILE_CHIPS)
+    .map((file) => `<span class="chip" title="${escapeHtml(file)}">${escapeHtml(file.split("/").pop() || file)}</span>`)
     .join("");
-  const moreFiles = entry.files.length > 4
-    ? `<span class="file muted">+${entry.files.length - 4} more</span>`
+  const more = entry.files.length > MAX_FILE_CHIPS
+    ? `<span class="chip" title="${escapeHtml(entry.files.slice(MAX_FILE_CHIPS).join("\n"))}">+${entry.files.length - MAX_FILE_CHIPS}</span>`
     : "";
 
-  return `<article class="entry ${entry.kind}">
+  return `<li class="entry ${entry.kind}" title="${escapeHtml(tooltip)}">
     <div class="entry-top">
       <span class="kind">${escapeHtml(kindLabel(entry))}</span>
-      <span class="hash">${escapeHtml(entry.shortHash)}</span>
+      <span class="time">${escapeHtml(formatRelativeTime(Date.parse(entry.authorDate), now))}</span>
     </div>
-    <div class="subject">${escapeHtml(entry.subject)}</div>
-    <div class="meta">${escapeHtml(formatDate(entry.authorDate))} by ${escapeHtml(entry.author || "unknown author")}</div>
-    <div class="meta">${escapeHtml(fileLabel(entry.files))}</div>
-    <div class="files">${filePreview}${moreFiles}</div>
-  </article>`;
+    ${chips || more ? `<div class="chips">${chips}${more}</div>` : ""}
+  </li>`;
 }
 
-/** Renders the branch, push and remote status block. */
+/** Renders a titled list of entries, or nothing if it is empty. */
+function buildSectionHtml(title: string, entries: RecordingHistoryEntry[], now: number): string {
+  if (entries.length === 0) {
+    return "";
+  }
+  return `<section>
+    <h2><span>${title}</span><span class="count" title="${entries.length} commit(s)">${entries.length}</span></h2>
+    <ul class="entries">${entries.map((entry) => buildEntryHtml(entry, now)).join("")}</ul>
+  </section>`;
+}
+
+/** Renders the recording state, branch and remote status. */
 function buildStatusHtml(
   state: RecordingBranchUiState,
   history: RecordingHistory | null
 ): string {
-  const branch = state.displayBranchName ?? state.finalBranchName ?? "none";
-  const status = state.isRecording
-    ? "Recording"
+  const assistant = state.assistantDisplayName ? ` with ${escapeHtml(state.assistantDisplayName)}` : "";
+  const [stateClass, stateText] = state.isRecording
+    ? ["recording", `Recording${assistant}`]
     : state.finalized
-      ? "Finalized"
-      : "Idle";
-  const pushStatus = state.isRecording
-    ? "Push available after recording stops"
-    : state.finalized
-      ? "Ready to push"
-      : "No finalized recording branch";
-  const upstream = history?.upstream ?? "no upstream";
-  const aheadBehind = history?.ahead === null || history?.behind === null
-    ? "ahead/behind unknown"
-    : `${history?.ahead ?? 0} ahead, ${history?.behind ?? 0} behind`;
+      ? ["saved", "Recording saved"]
+      : ["idle", "Recording not finalized"];
 
-  return `<section class="status">
-    <div><span class="label">State</span><span>${escapeHtml(status)}</span></div>
-    <div><span class="label">Branch</span><code>${escapeHtml(branch)}</code></div>
-    <div><span class="label">Push</span><span>${escapeHtml(pushStatus)}</span></div>
-    <div><span class="label">Remote</span><span>${escapeHtml(upstream)} (${escapeHtml(aheadBehind)})</span></div>
-  </section>`;
+  if (state.commitMode === "currentBranch") {
+    return `<header class="status">
+      <div class="state ${stateClass}"><span class="dot"></span>${stateText}</div>
+      <div class="hint">Commits go directly onto your current branch; see Source Control.</div>
+    </header>`;
+  }
+
+  const branch = state.finalBranchName ?? state.displayBranchName ?? "none";
+  let remote: string;
+  if (!history?.upstream) {
+    remote = state.finalized && !state.isRecording
+      ? `Not pushed yet. Push it like any branch, e.g. <code>git push -u origin ${escapeHtml(branch)}</code>`
+      : "Not pushed yet";
+  } else {
+    const counts = history.ahead === null || history.behind === null
+      ? ""
+      : history.ahead === 0 && history.behind === 0
+        ? " · up to date"
+        : ` · ${history.ahead} ahead, ${history.behind} behind`;
+    remote = `Pushed to <code>${escapeHtml(history.upstream)}</code>${counts}`;
+  }
+
+  const visualize = history && history.entries.length > 0
+    ? `<button id="visualize" title="Color the lines of the open file by the recording commit that last changed them">Show edit history in editor</button>`
+    : "";
+  return `<header class="status">
+    <div class="state ${stateClass}"><span class="dot"></span>${stateText}</div>
+    <div class="row"><span class="label">Branch</span><code>${escapeHtml(branch)}</code></div>
+    <div class="row"><span class="label">Remote</span><span>${remote}</span></div>
+    ${visualize}
+  </header>`;
 }
 
 /** Builds a notice with a Recover button when earlier recordings were never finalized. */
@@ -116,6 +119,30 @@ function buildUnfinishedHtml(
   </div>`;
 }
 
+/** Builds the main content: the commit sections, or a hint about what to do next. */
+function buildBodyHtml(
+  state: RecordingBranchUiState | null,
+  history: RecordingHistory | null,
+  unfinishedCount: number,
+  now: number
+): string {
+  if (!state) {
+    return unfinishedCount > 0
+      ? ""
+      : `<div class="empty">No recording for this branch yet. Click <b>Start Flight Recorder</b> in the status bar to begin.</div>`;
+  }
+  if (state.commitMode === "currentBranch") {
+    return "";
+  }
+  const entries = history?.entries ?? [];
+  if (entries.length === 0) {
+    return `<div class="empty">${state.isRecording ? "Waiting for the first change." : "This recording has no commits."}</div>`;
+  }
+
+  return buildSectionHtml("Current recording", entries.filter((entry) => !entry.saved), now) +
+    buildSectionHtml("Saved", entries.filter((entry) => entry.saved), now);
+}
+
 /** Builds the complete webview HTML for the recording history panel. */
 export function buildHtml(
   state: RecordingBranchUiState | null,
@@ -123,20 +150,9 @@ export function buildHtml(
   message: string | null,
   unfinishedCount: number,
   cspSource: string,
-  pushInProgress: boolean
+  now = Date.now()
 ): string {
   const nonce = crypto.randomBytes(16).toString("base64");
-  const canPush = !!state && !state.isRecording && state.finalized && !!state.finalBranchName && !pushInProgress;
-  const entries = history?.entries ?? [];
-  const body = !state
-    ? unfinishedCount > 0
-      ? ""
-      : `<div class="empty">Start a recording to see Flight Recorder history.</div>`
-    : history === null
-      ? `<div class="empty">No recording branch found yet.</div>`
-      : entries.length === 0
-        ? `<div class="empty">No recording commits found on this branch yet.</div>`
-        : entries.map(buildEntryHtml).join("");
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -144,138 +160,54 @@ export function buildHtml(
     <meta charset="UTF-8" />
     <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';" />
     <style>
+${SHARED_WEBVIEW_CSS}
       body {
-        margin: 0;
-        padding: 12px;
         background: var(--vscode-sideBar-background);
         color: var(--vscode-sideBar-foreground);
-        font-family: var(--vscode-font-family);
       }
-      .toolbar {
-        display: grid;
-        grid-template-columns: 1fr auto auto;
-        gap: 6px;
+      .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        flex: none;
+        background: var(--vscode-descriptionForeground);
+      }
+      .recording .dot { background: var(--vscode-charts-red); }
+      .saved .dot { background: var(--vscode-charts-green); }
+      .notice {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: space-between;
         align-items: center;
-        margin-bottom: 10px;
+        gap: 6px;
+        padding: 8px 0;
+        border-bottom: 1px solid var(--vscode-panel-border);
       }
-      .title {
-        font-weight: 600;
-        min-width: 0;
-      }
-      button {
-        border: 1px solid var(--vscode-button-border, transparent);
-        background: var(--vscode-button-secondaryBackground);
-        color: var(--vscode-button-secondaryForeground);
-        padding: 3px 8px;
-        border-radius: 4px;
-        font: inherit;
-        cursor: pointer;
-      }
-      button.primary {
+      .entry.human { border-left-color: var(--vscode-charts-blue); }
+      .entry.assistant { border-left-color: var(--vscode-charts-purple); }
+      #visualize {
+        justify-self: start;
+        margin-top: 4px;
         background: var(--vscode-button-background);
         color: var(--vscode-button-foreground);
       }
-      button:disabled {
-        cursor: default;
-        opacity: 0.55;
-      }
-      .status {
-        display: grid;
-        gap: 4px;
-        padding: 8px 0 10px;
-        border-bottom: 1px solid var(--vscode-panel-border);
-        margin-bottom: 6px;
-        font-size: 12px;
-      }
-      .status div {
-        display: grid;
-        grid-template-columns: 54px 1fr;
-        gap: 8px;
-        min-width: 0;
-      }
-      .label, .meta, .muted {
-        color: var(--vscode-descriptionForeground);
-      }
-      code, .hash {
-        font-family: var(--vscode-editor-font-family);
-      }
-      code {
-        word-break: break-word;
-      }
-      .notice {
-        color: var(--vscode-descriptionForeground);
-        border-bottom: 1px solid var(--vscode-panel-border);
-        padding-bottom: 8px;
-        margin-bottom: 8px;
-      }
-      .unfinished {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        gap: 8px;
-      }
-      .entry {
-        padding: 9px 0;
-        border-bottom: 1px solid var(--vscode-panel-border);
-      }
-      .entry-top {
-        display: flex;
-        justify-content: space-between;
-        gap: 8px;
-        align-items: baseline;
-      }
-      .kind {
-        font-weight: 600;
-      }
-      .subject {
-        line-height: 1.35;
-        margin-top: 3px;
-      }
-      .meta {
-        font-size: 12px;
-        margin-top: 3px;
-      }
-      .files {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 4px;
-        margin-top: 6px;
-      }
-      .file {
-        font-size: 11px;
-        border: 1px solid var(--vscode-badge-background);
-        border-radius: 4px;
-        padding: 1px 5px;
-        max-width: 100%;
-        overflow-wrap: anywhere;
-      }
-      .empty {
-        color: var(--vscode-descriptionForeground);
-        line-height: 1.45;
-        padding-top: 10px;
+      #visualize:hover {
+        background: var(--vscode-button-hoverBackground);
       }
     </style>
   </head>
   <body>
-    <div class="toolbar">
-      <div class="title">Recording History</div>
-      <button id="refresh" title="Refresh">Refresh</button>
-      <button id="push" class="primary" ${canPush ? "" : "disabled"} title="${canPush ? "Push finalized recording branch" : "Push is available after recording stops"}">Push</button>
-    </div>
     ${state ? buildStatusHtml(state, history) : ""}
     ${buildUnfinishedHtml(unfinishedCount, !!state?.isRecording)}
     ${message ? `<div class="notice">${escapeHtml(message)}</div>` : ""}
-    ${body}
+    ${buildBodyHtml(state, history, unfinishedCount, now)}
     <script nonce="${nonce}">
       const vscode = acquireVsCodeApi();
-      document.getElementById("refresh")?.addEventListener("click", () => {
-        vscode.postMessage({ type: "refresh" });
-      });
-      document.getElementById("push")?.addEventListener("click", () => {
-        vscode.postMessage({ type: "push" });
-      });
       document.getElementById("recover")?.addEventListener("click", () => {
         vscode.postMessage({ type: "recover" });
+      });
+      document.getElementById("visualize")?.addEventListener("click", () => {
+        vscode.postMessage({ type: "visualize" });
       });
     </script>
   </body>

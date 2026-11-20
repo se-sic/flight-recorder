@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import * as path from "path";
+import { pathToFileURL } from "url";
+import { normalizePath } from "../src/utils/fs-path";
 import { CopilotChatSessionParser } from "../src/recording/agents/copilot/chat-session";
 import { CopilotLogParser } from "../src/recording/agents/copilot/parser";
 
@@ -13,9 +15,13 @@ const SAMPLE_MESSAGE_VARIANT =
   "[edit-tool:efcf0ac7-59d2-4c9b-b0d4-4d84a23ce134] " +
   "[{\"input\":\"*** Begin Patch\\n*** Update File: /tmp/demo/foo.py\\n@@\\n-\\\"hello\\\"\\n import csv\\n import numpy as np\\n import os\\n*** End Patch\",\"success\":true}]";
 
+// Built per platform: a Windows file URI must contain a drive letter.
+const FOO_PY_URI = pathToFileURL(path.resolve("/tmp/demo/foo.py")).href;
+const FOO_TS_URI = pathToFileURL(path.resolve("/tmp/demo/foo.ts")).href;
+
 const SAMPLE_GET_COMPLETIONS =
   "2026-04-28 10:48:28.385 [debug] [getCompletions] " +
-  "Requesting for file:///tmp/demo/foo.py " +
+  `Requesting for ${FOO_PY_URI} ` +
   "at 13:0 between \"from src.sampling import sample_random, sample_twise\\r\\n\" and \"\\r\\n\\r\\n\".";
 
 const SAMPLE_GHOSTTEXT_ACCEPTED =
@@ -36,7 +42,7 @@ test("CopilotLogParser parses edit-tool patch events", () => {
   assert.equal(ev.source.assistantId, "github-copilot");
   assert.equal(ev.source.rawSignal, "edit-tool");
 
-  const expectedPath = path.resolve("/tmp/demo/foo.py");
+  const expectedPath = normalizePath("/tmp/demo/foo.py");
   assert.deepEqual(ev.fileOperations, [
     {
       kind: "update",
@@ -56,7 +62,7 @@ test("CopilotLogParser parses edit-tool when marker is in message", () => {
   assert.equal(ev.capability, "file-edit");
   assert.equal(ev.requestId, "efcf0ac7-59d2-4c9b-b0d4-4d84a23ce134");
 
-  const expectedPath = path.resolve("/tmp/demo/foo.py");
+  const expectedPath = normalizePath("/tmp/demo/foo.py");
   assert.deepEqual(ev.fileOperations, [
     {
       kind: "update",
@@ -83,7 +89,7 @@ test("CopilotLogParser parses inline completion acceptance", () => {
     column: 1,
   });
 
-  const normalizedExpected = path.normalize("/tmp/demo/foo.py");
+  const normalizedExpected = normalizePath("/tmp/demo/foo.py");
   assert.deepEqual(
     ev.fileOperations.map((operation) => ({
       kind: operation.kind,
@@ -111,7 +117,7 @@ test("CopilotChatSessionParser emits textEditGroup events", () => {
           value: [
             {
               kind: "textEditGroup",
-              uri: "file:///tmp/demo/foo.ts",
+              uri: FOO_TS_URI,
               done: true,
               edits: [
                 {
@@ -152,7 +158,7 @@ test("CopilotChatSessionParser emits textEditGroup events", () => {
   assert.deepEqual(ev.fileOperations, [
     {
       kind: "update",
-      path: path.resolve("/tmp/demo/foo.ts"),
+      path: normalizePath("/tmp/demo/foo.ts"),
     },
   ]);
 

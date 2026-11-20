@@ -1,6 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import { gitCmd } from "./git";
+import { normalizePath, relativePathInside } from "./fs-path";
 
 /** Resolves the git repository's top-level directory, throwing if the folder is not a git repository. */
 export async function getGitTopLevel(repoRoot: string): Promise<string> {
@@ -9,7 +10,7 @@ export async function getGitTopLevel(repoRoot: string): Promise<string> {
     throw new Error("The opened folder is not a git repository.");
   }
 
-  return path.resolve(res.out.trim());
+  return normalizePath(res.out.trim());
 }
 
 /** Appends a line to a file if it is not already present (trimmed comparison), creating the file/directory if needed. */
@@ -38,10 +39,10 @@ export async function addGitExcludeEntries(
   const excludePath = path.join(gitTopLevel, ".git", "info", "exclude");
 
   for (const absolutePath of absolutePaths) {
-    const relative = path.relative(gitTopLevel, absolutePath);
-    if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    const relative = relativePathInside(gitTopLevel, absolutePath);
+    if (!relative) {
       continue;
     }
-    ensureLineInFile(excludePath, relative.split(path.sep).join("/"));
+    ensureLineInFile(excludePath, relative);
   }
 }

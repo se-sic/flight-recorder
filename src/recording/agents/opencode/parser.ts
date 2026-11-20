@@ -1,5 +1,6 @@
 import * as crypto from "crypto";
 import * as path from "path";
+import { normalizePath } from "../../../utils/fs-path";
 import {
   AssistantCapability,
   AssistantEvent,
@@ -233,8 +234,8 @@ export class OpenCodeParser {
   /** Resolves an OpenCode path (absolute, or relative to the session directory) to an absolute path. */
   private resolvePath(candidate: string): string {
     return this.directory
-      ? path.resolve(this.directory, candidate)
-      : path.resolve(candidate);
+      ? normalizePath(this.directory, candidate)
+      : normalizePath(candidate);
   }
 
   /** Builds the fields shared by every event derived from one plugin record. */

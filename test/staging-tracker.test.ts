@@ -223,6 +223,25 @@ test("assistant boundary drops overlapping files from the flushed human window",
   );
 });
 
+test("assistant boundary matches files whose Windows drive letters differ in case", { skip: process.platform !== "win32" }, () => {
+  const tracker = new FineGrainedStagingTracker(1_000);
+
+  // VS Code reports `e:\...`, Claude Code reports `E:\...`.
+  tracker.recordHumanChange(["e:\\repo\\test.txt"], 1_000);
+
+  const commits = tracker.recordAssistantEvent(
+    makeAssistantEvent({
+      fileOperations: [{ kind: "create", path: "E:\\repo\\test.txt" }],
+    }),
+    2_000
+  );
+
+  assert.equal(commits.length, 0);
+  const assistantCommit = tracker.flushAll(4_000)[0];
+  assert.equal(assistantCommit.kind, "assistant");
+  assert.deepEqual(assistantCommit.files, ["E:\\repo\\test.txt"]);
+});
+
 test("assistant boundary keeps earlier human text of a shared file", () => {
   const tracker = new FineGrainedStagingTracker(1_000);
   const shared = path.resolve("/tmp/shared.ts");

@@ -5,6 +5,7 @@ import type { RecordingHistory, RecordingHistoryEntry } from "../src/history-pan
 import { buildHtml } from "../src/history-panel/view";
 
 const CSP = "vscode-webview://test";
+const NOW = Date.parse("2026-11-04T10:30:00+01:00");
 
 function state(overrides: Partial<RecordingBranchUiState> = {}): RecordingBranchUiState {
   return {
@@ -29,6 +30,7 @@ function entry(overrides: Partial<RecordingHistoryEntry> = {}): RecordingHistory
     kind: "human",
     files: ["readme.md"],
     origins: [],
+    saved: true,
     ...overrides,
   };
 }
@@ -51,33 +53,44 @@ function tagWithId(html: string, id: string): string {
   return match[0];
 }
 
-test("panel without any recording asks to start one", () => {
-  const html = buildHtml(null, null, null, 0, CSP, false);
-  assert.match(html, /Start a recording to see Flight Recorder history/);
-  assert.match(tagWithId(html, "push"), /disabled/);
+test("panel without any recording explains how to start one", () => {
+  const html = buildHtml(null, null, null, 0, CSP, NOW);
+  assert.match(html, /No recording for this branch yet/);
+  assert.match(html, /Start Flight Recorder/);
   assert.doesNotMatch(html, /id="recover"/);
+  assert.doesNotMatch(html, /id="push"/);
 });
 
-test("push is disabled while recording and enabled once finalized", () => {
-  const recording = buildHtml(
-    state({ isRecording: true, finalized: false, displayBranchName: "flight-recorder-active/main/x" }),
-    history([entry()]),
+test("commits of a running recording are listed apart from saved ones", () => {
+  const html = buildHtml(
+    state({ isRecording: true, finalized: false, assistantDisplayName: "Claude Code", displayBranchName: "flight-recorder-active/main/x" }),
+    history([entry({ saved: false, hash: "b".repeat(40) }), entry()]),
     null,
     0,
     CSP,
-    false
+    NOW
   );
-  assert.match(tagWithId(recording, "push"), /disabled/);
-  assert.match(recording, /Push available after recording stops/);
-  assert.match(recording, /flight-recorder-active\/main\/x/);
+  assert.match(html, /Recording with Claude Code/);
+  assert.match(html, /<span>Current recording<\/span><span class="count"[^>]*>1<\/span>/);
+  assert.match(html, /<span>Saved<\/span><span class="count"[^>]*>1<\/span>/);
+  assert.ok(html.indexOf("Current recording") < html.indexOf("<span>Saved</span>"));
+});
 
-  const finalized = buildHtml(state(), history([entry()]), null, 0, CSP, false);
-  assert.doesNotMatch(tagWithId(finalized, "push"), /disabled/);
-  assert.match(finalized, /Ready to push/);
-  assert.match(finalized, /no upstream \(ahead\/behind unknown\)/);
+test("a saved recording shows only the saved section and how to push it", () => {
+  const html = buildHtml(state(), history([entry()]), null, 0, CSP, NOW);
+  assert.match(html, /Recording saved/);
+  assert.doesNotMatch(html, /Current recording/);
+  assert.match(html, /Not pushed yet/);
+  assert.match(html, /git push -u origin flight-recorder\/main/);
+});
 
-  const pushing = buildHtml(state(), history([entry()]), null, 0, CSP, true);
-  assert.match(tagWithId(pushing, "push"), /disabled/);
+test("the edit history button is shown only when the branch has commits", () => {
+  const withCommits = buildHtml(state(), history([entry()]), null, 0, CSP, NOW);
+  assert.match(tagWithId(withCommits, "visualize"), /<button/);
+  assert.match(withCommits, /postMessage\(\{ type: "visualize" \}\)/);
+
+  const empty = buildHtml(state(), history([]), null, 0, CSP, NOW);
+  assert.doesNotMatch(empty, /id="visualize"/);
 });
 
 test("remote status shows ahead and behind counts", () => {
@@ -87,22 +100,23 @@ test("remote status shows ahead and behind counts", () => {
     null,
     0,
     CSP,
-    false
+    NOW
   );
-  assert.match(html, /origin\/flight-recorder\/main \(2 ahead, 1 behind\)/);
+  assert.match(html, /Pushed to <code>origin\/flight-recorder\/main<\/code> · 2 ahead, 1 behind/);
+  assert.doesNotMatch(html, /git push/);
 });
 
 test("unfinished recordings show a Recover button that is disabled while recording", () => {
-  const idle = buildHtml(null, null, null, 2, CSP, false);
+  const idle = buildHtml(null, null, null, 2, CSP, NOW);
   assert.match(idle, /2 earlier recording\(s\) were not finalized/);
   assert.doesNotMatch(tagWithId(idle, "recover"), /disabled/);
-  assert.doesNotMatch(idle, /Start a recording/);
+  assert.doesNotMatch(idle, /No recording for this branch yet/);
 
-  const recording = buildHtml(state({ isRecording: true, finalized: false }), history([]), null, 1, CSP, false);
+  const recording = buildHtml(state({ isRecording: true, finalized: false }), history([]), null, 1, CSP, NOW);
   assert.match(tagWithId(recording, "recover"), /disabled/);
 });
 
-test("entries show kind, origins and files, with long file lists truncated", () => {
+test("entries show kind, readable origins, relative time and file names", () => {
   const html = buildHtml(
     state(),
     history([
@@ -110,30 +124,30 @@ test("entries show kind, origins and files, with long file lists truncated", () 
         kind: "assistant",
         subject: "Flight Recorder: assistant tool edit (6 files)",
         origins: ["assistant-tool-edit"],
-        files: ["a", "b", "c", "d", "e", "f"],
+        files: ["src/a.ts", "b", "c", "d", "e", "f"],
       }),
       entry({ kind: "log", subject: "recording stopped: x", files: [] }),
     ]),
     null,
     0,
     CSP,
-    false
+    NOW
   );
-  assert.match(html, /Assistant: assistant-tool-edit/);
-  assert.match(html, /6 files/);
-  assert.match(html, /\+2 more/);
-  assert.match(html, /Log snapshot/);
-  assert.match(html, /No file metadata/);
+  assert.match(html, /Assistant · tool edit/);
+  assert.match(html, /30 min ago/);
+  assert.match(html, /title="src\/a.ts">a.ts</);
+  assert.match(html, />\+2</);
+  assert.match(html, /Assistant log/);
 });
 
 test("commit data and messages are HTML-escaped", () => {
   const html = buildHtml(
-    state({ displayBranchName: "flight-recorder/<b>" }),
-    history([entry({ subject: "<script>alert(1)</script>", author: "\"Eve\" & co", files: ["<img src=x>"] })]),
+    state({ finalBranchName: "flight-recorder/<b>" }),
+    history([entry({ kind: "unknown", subject: "<script>alert(1)</script>", author: "\"Eve\" & co", files: ["<img src=x>"] })]),
     "Pushed <now>",
     0,
     CSP,
-    false
+    NOW
   );
   assert.doesNotMatch(html, /<script>alert/);
   assert.doesNotMatch(html, /<img src=x>/);
@@ -144,11 +158,11 @@ test("commit data and messages are HTML-escaped", () => {
 });
 
 test("the webview only runs its own nonce-tagged script", () => {
-  const html = buildHtml(state(), history([entry()]), null, 0, CSP, false);
+  const html = buildHtml(state(), history([entry()]), null, 0, CSP, NOW);
   const nonce = html.match(/script-src 'nonce-([^']+)'/)?.[1];
   assert.ok(nonce);
   assert.match(html, /default-src 'none'/);
   const scripts = html.match(/<script[^>]*>/g) ?? [];
   assert.deepEqual(scripts, [`<script nonce="${nonce}">`]);
-  assert.notEqual(buildHtml(state(), history([]), null, 0, CSP, false).match(/nonce-([^']+)/)?.[1], nonce);
+  assert.notEqual(buildHtml(state(), history([]), null, 0, CSP, NOW).match(/nonce-([^']+)/)?.[1], nonce);
 });

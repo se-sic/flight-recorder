@@ -23,5 +23,16 @@ export default [{
         eqeqeq: "warn",
         "no-throw-literal": "warn",
         semi: "warn",
+
+        // Paths from VS Code must be normalized; see src/utils/fs-path.ts and AGENTS.md.
+        "no-restricted-syntax": ["error", {
+            selector: "MemberExpression[property.name='fsPath']",
+            message: "Use uriToPath() from src/utils/fs-path.ts instead of reading uri.fsPath.",
+        }],
+    },
+}, {
+    files: ["src/utils/fs-path.ts"],
+    rules: {
+        "no-restricted-syntax": "off",
     },
 }];

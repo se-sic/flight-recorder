@@ -1,5 +1,4 @@
 import * as fs from "fs";
-import * as path from "path";
 import * as vscode from "vscode";
 import { exportCurrentWorkspaceChats } from "./chat-export";
 import {
@@ -17,6 +16,8 @@ import {
   RecordingFinalizationResult,
   RecordingCommitMode,
   RecordingCommitTarget,
+  readSourceBranchName,
+  recordingBranchName,
   validateGitRecordingReadiness,
 } from "./commits";
 import { Tailer } from "../utils/tailer";
@@ -39,7 +40,8 @@ import {
 } from "./staging-tracker";
 import { getClaudeSourceMode } from "./agents/claude/config";
 import { getLogChannel } from "../utils/logging";
-import { getWorkspaceRepoRoot } from "../utils/paths";
+import { getWorkspaceRepoRoot, workspaceRootPath } from "../utils/paths";
+import { normalizePath, relativePathInside, samePath, uriToPath } from "../utils/fs-path";
 import { EXTENSION_NAME } from "../utils/constants";
 
 type RecordingSession = {
@@ -116,8 +118,8 @@ export function restoreRecordingBranchState(
   const stored = context.workspaceState.get<RecordingBranchUiState>(
     LAST_RECORDING_BRANCH_STATE_KEY
   );
-  const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-  if (stored && (!workspaceRoot || stored.repoRoot === workspaceRoot)) {
+  const workspaceRoot = workspaceRootPath();
+  if (stored && (!workspaceRoot || samePath(stored.repoRoot, workspaceRoot))) {
     lastRecordingBranchState = { ...stored, isRecording: false };
   }
 }
@@ -166,13 +168,46 @@ export function getRecordingBranchState(): RecordingBranchUiState | null {
   return lastRecordingBranchState;
 }
 
+/**
+ * Returns the branch state the history panel shows: the running session, or
+ * otherwise the recording branch of the checked-out branch, so the panel
+ * follows branch switches. The last recording's details are kept when it
+ * was made on the checked-out branch.
+ */
+export async function getPanelBranchState(): Promise<RecordingBranchUiState | null> {
+  const last = getRecordingBranchState();
+  const repoRoot = workspaceRootPath();
+  const cfg = vscode.workspace.getConfiguration("flightRecorder");
+  if (running || !repoRoot || cfg.get<RecordingCommitMode>("commitMode", "trackingWorktree") !== "trackingWorktree") {
+    return last;
+  }
+
+  const sourceBranchName = await readSourceBranchName(repoRoot);
+  if (last?.commitMode === "trackingWorktree" && last.sourceBranchName === sourceBranchName) {
+    return last;
+  }
+  const finalBranchName = recordingBranchName(
+    sourceBranchName,
+    cfg.get<string>("trackingBranchPrefix", "flight-recorder")
+  );
+  return {
+    repoRoot,
+    isRecording: false,
+    commitMode: "trackingWorktree",
+    sourceBranchName,
+    finalBranchName,
+    displayBranchName: finalBranchName,
+    finalized: true,
+  };
+}
+
 /** Resolves a `file:` scheme URI to a normalized absolute path, or null for non-file URIs. */
 function normalizeFileUri(uri: vscode.Uri): string | null {
   if (uri.scheme !== "file") {
     return null;
   }
 
-  return path.resolve(uri.fsPath);
+  return uriToPath(uri);
 }
 
 /** Filters out the session's own assistant log file from a set of tracked paths, so Flight Recorder never commits its own log as a human/assistant edit. */
@@ -182,10 +217,10 @@ function filterInternalTrackingPaths(
 ): string[] {
   const ignored = new Set<string>();
   if (session.logFile) {
-    ignored.add(path.resolve(session.logFile));
+    ignored.add(normalizePath(session.logFile));
   }
 
-  return Array.from(new Set(Array.from(paths).map((candidate) => path.resolve(candidate))))
+  return Array.from(new Set(Array.from(paths).map((candidate) => normalizePath(candidate))))
     .sort((left, right) => left.localeCompare(right))
     .filter((candidate) => !ignored.has(candidate));
 }
@@ -195,7 +230,7 @@ async function saveTrackedFilesIfOpen(
   pathsToSave: Iterable<string>
 ): Promise<void> {
   const targetPaths = Array.from(
-    new Set(Array.from(pathsToSave).map((p) => path.resolve(p)))
+    new Set(Array.from(pathsToSave).map((p) => normalizePath(p)))
   );
 
   for (const targetPath of targetPaths) {
@@ -203,7 +238,7 @@ async function saveTrackedFilesIfOpen(
       if (d.uri.scheme !== "file") {
         return false;
       }
-      return path.resolve(d.uri.fsPath) === targetPath;
+      return uriToPath(d.uri) === targetPath;
     });
 
     if (!doc || !doc.isDirty) {
@@ -324,8 +359,8 @@ function watchDiskChanges(session: RecordingSession): vscode.Disposable[] {
     if (!filePath) {
       return;
     }
-    const rel = path.relative(session.repoRoot, filePath);
-    if (rel.startsWith("..") || rel.split(path.sep).includes(".git")) {
+    const rel = relativePathInside(session.repoRoot, filePath);
+    if (rel === null || rel.split("/").includes(".git")) {
       return;
     }
     if (!deleted) {
@@ -1011,7 +1046,7 @@ function getTrackingBranchPrefix(): string {
  * workspace folder is open.
  */
 export async function listUnfinishedRecordings(): Promise<PendingTrackingSession[]> {
-  const repoRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  const repoRoot = workspaceRootPath();
   if (!repoRoot) {
     return [];
   }
