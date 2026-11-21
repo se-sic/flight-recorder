@@ -5,8 +5,14 @@ import { escapeHtml, formatRelativeTime, SHARED_WEBVIEW_CSS } from "../utils/web
 
 const MAX_FILE_CHIPS = 4;
 
-/** Turns an origin like `assistant-tool-edit` into `tool edit`. */
+/**
+ * Turns an origin like `assistant-tool-edit` into `tool edit`. Edits without
+ * a known origin come from shell commands, MCP tools or subagents.
+ */
 function originLabel(origin: string): string {
+  if (origin === "assistant-unknown") {
+    return "other tool";
+  }
   return origin.replace(/^assistant-/, "").replace(/-/g, " ");
 }
 

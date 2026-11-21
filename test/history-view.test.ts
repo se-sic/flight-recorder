@@ -166,3 +166,15 @@ test("the webview only runs its own nonce-tagged script", () => {
   assert.deepEqual(scripts, [`<script nonce="${nonce}">`]);
   assert.notEqual(buildHtml(state(), history([]), null, 0, CSP, NOW).match(/nonce-([^']+)/)?.[1], nonce);
 });
+
+test("edits without a known origin are labeled as coming from another tool", () => {
+  const html = buildHtml(
+    state(),
+    history([entry({ kind: "assistant", subject: "Flight Recorder: assistant edits (1 file)", origins: ["assistant-unknown"], files: ["license"] })]),
+    null,
+    0,
+    CSP
+  );
+  assert.match(html, /Assistant · other tool/);
+  assert.doesNotMatch(html, /unknown/);
+});
