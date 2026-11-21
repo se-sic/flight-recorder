@@ -528,6 +528,21 @@ export async function anonymizeCurrentRepository(
     }
     createdDestination = true;
 
+    // A clone only checks out the default branch; the other branches (above
+    // all the flight-recorder/* recordings) exist only as remote-tracking refs
+    // and would disappear with the remote. Copy every branch to a local one.
+    const branchesRes = await gitCmd(
+      ["fetch", "--update-head-ok", "origin", "+refs/heads/*:refs/heads/*"],
+      destRepoPath
+    );
+    if (branchesRes.code !== 0) {
+      return formatGitFailure(
+        "Failed to copy all branches into the anonymized repository.",
+        branchesRes.err,
+        branchesRes.out
+      );
+    }
+
     // Remove the original remote so the anonymized repository cannot be pushed
     // back to the source repository by accident.
     const removeOriginRes = await gitCmd(["remote", "remove", "origin"], destRepoPath);
