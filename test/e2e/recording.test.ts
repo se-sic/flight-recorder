@@ -1,6 +1,7 @@
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import * as vscode from "vscode";
 import {
   claudeBash,
   claudeEdit,
@@ -173,5 +174,27 @@ suite("E2/E3 Claude hook recording", () => {
 
     assert.equal(git(repoRoot(), "merge-base", "--is-ancestor", firstHead, "flight-recorder/main"), "");
     assert.ok(Number(git(repoRoot(), "rev-list", "--count", `${firstHead}..flight-recorder/main`)) >= 2);
+  });
+
+  test("stopping while the window no longer answers still commits and finalizes", async () => {
+    await configureClaudeHooks();
+    await startRecording();
+    await humanEdit("readme.md", "\nedited right before a reload\n");
+
+    // During a reload, calls to the window (like setContext) may never settle.
+    const commands = vscode.commands as unknown as Record<string, unknown>;
+    const executeCommand = vscode.commands.executeCommand;
+    commands.executeCommand = (command: string, ...args: unknown[]) =>
+      command === "setContext" ? new Promise(() => undefined) : executeCommand(command, ...args);
+    try {
+      await stopRecording();
+    } finally {
+      commands.executeCommand = executeCommand;
+    }
+
+    const commits = recordedCommits("flight-recorder/main");
+    assert.ok(commits.includes("Flight Recorder: human edits (1 file)"), commits.join("\n"));
+    assert.match(showFile("flight-recorder/main", "readme.md"), /edited right before a reload/);
+    assert.deepEqual(listBranches(repoRoot()).filter((name) => name.includes("-active/")), []);
   });
 });

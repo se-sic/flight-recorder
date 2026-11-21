@@ -81,6 +81,10 @@ export type RecordingBranchUiState = {
 
 let running: RecordingSession | null = null;
 let stopping = false;
+/** Set while VS Code shuts the extension down; the window may no longer answer calls then. */
+let shuttingDown = false;
+/** How long to wait for a call that needs the VS Code window before going on without it. */
+const WINDOW_CALL_TIMEOUT_MS = 1_500;
 let recordingStatusBarItem: vscode.StatusBarItem | null = null;
 let extensionContextRef: vscode.ExtensionContext | null = null;
 let claudeNewSessionHintShown = false;
@@ -225,10 +229,33 @@ function filterInternalTrackingPaths(
     .filter((candidate) => !ignored.has(candidate));
 }
 
+/**
+ * Waits for a call that needs the VS Code window, but at most `ms`. During a
+ * reload or shutdown the window may never answer, and waiting for it would
+ * keep the recording from being committed. Rejections count as no answer.
+ */
+async function settleWithin<T>(call: Thenable<T>, ms: number): Promise<T | undefined> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => resolve(undefined), ms);
+  });
+  try {
+    return await Promise.race([Promise.resolve(call), timeout]);
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** Saves any open, dirty editor documents among the given paths, so a commit captures their current content. */
 async function saveTrackedFilesIfOpen(
   pathsToSave: Iterable<string>
 ): Promise<void> {
+  // Human commits carry editor snapshots, so skipping the save at shutdown loses nothing.
+  if (shuttingDown) {
+    return;
+  }
   const targetPaths = Array.from(
     new Set(Array.from(pathsToSave).map((p) => normalizePath(p)))
   );
@@ -245,7 +272,7 @@ async function saveTrackedFilesIfOpen(
       continue;
     }
 
-    const saved = await doc.save();
+    const saved = await settleWithin(doc.save(), WINDOW_CALL_TIMEOUT_MS);
     if (saved) {
       getLogChannel().info(`Saved ${targetPath}`);
     } else {
@@ -493,10 +520,12 @@ function updateRecordingStatusIndicator(active: boolean): void {
 
 /** Sets the `flightRecorder.isRecording` VS Code context key, used by menu/keybinding `when` clauses. */
 async function setRecordingContext(active: boolean): Promise<void> {
-  await vscode.commands.executeCommand(
-    "setContext",
-    "flightRecorder.isRecording",
-    active
+  if (shuttingDown) {
+    return;
+  }
+  await settleWithin(
+    vscode.commands.executeCommand("setContext", "flightRecorder.isRecording", active),
+    WINDOW_CALL_TIMEOUT_MS
   );
 }
 
@@ -1219,10 +1248,13 @@ export async function exportAllChats(
   );
 }
 
+/** Stops a running recording when the extension is deactivated (window reload or close). */
 export async function deactivateRecording(): Promise<void> {
+  // VS Code gives deactivation only a few seconds, and the window is already
+  // going away: stop without waiting for it, so the commits still land.
+  shuttingDown = true;
   if (running) {
     await stopRecording();
   }
-  await setRecordingContext(false);
   updateRecordingStatusIndicator(false);
 }
