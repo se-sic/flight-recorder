@@ -25,6 +25,7 @@ export type FlightRecorderApi = {
   getRecordingBranchState: () => BranchState | null;
   getPersistedRecordingBranchState: () => BranchState | undefined;
   listUnfinishedRecordings: () => Promise<Array<{ activeBranchName: string; finalBranchName: string }>>;
+  getPanelBranchState: () => Promise<(BranchState & { sourceBranchName?: string }) | null>;
 };
 export const HOOK_LOG = ".claude/flight-recorder-hooks.jsonl";
 

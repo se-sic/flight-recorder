@@ -6,6 +6,7 @@ import {
 } from "./visualization/controller";
 import {
   exportAllChats,
+  getPanelBranchState,
   getRecordingBranchState,
   initializeRecordingContext,
   LAST_RECORDING_BRANCH_STATE_KEY,
@@ -31,6 +32,7 @@ export type FlightRecorderApi = {
   getRecordingBranchState: () => RecordingBranchUiState | null;
   getPersistedRecordingBranchState: () => RecordingBranchUiState | undefined;
   listUnfinishedRecordings: typeof listUnfinishedRecordings;
+  getPanelBranchState: typeof getPanelBranchState;
 };
 
 /** Extension activation entry point: sets up logging, the recording status bar item, and registers all commands. */
@@ -143,6 +145,7 @@ export function activate(context: vscode.ExtensionContext): FlightRecorderApi {
     getPersistedRecordingBranchState: () =>
       context.workspaceState.get<RecordingBranchUiState>(LAST_RECORDING_BRANCH_STATE_KEY),
     listUnfinishedRecordings,
+    getPanelBranchState,
   };
 }
 
