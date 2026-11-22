@@ -199,6 +199,23 @@ export async function configureClaudeHooks(): Promise<DialogCall[]> {
   return stub.calls;
 }
 
+/** Runs "Configure OpenCode Plugin", confirming its dialog. */
+export async function configureOpenCodePlugin(): Promise<void> {
+  const stub = stubDialogs({
+    "OpenCode plugin to": "Configure OpenCode Plugin",
+    "configured the OpenCode plugin": "OK",
+  });
+  try {
+    await within(
+      vscode.commands.executeCommand("flightRecorder.configureOpenCodePlugin"),
+      10_000,
+      "the Configure OpenCode Plugin command"
+    );
+  } finally {
+    stub.restore();
+  }
+}
+
 /** Opens `rel` in an editor, appends `text` through a real edit, and saves. */
 export async function humanEdit(rel: string, text: string): Promise<vscode.TextDocument> {
   const uri = vscode.Uri.file(path.join(repoRoot(), rel));

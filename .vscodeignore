@@ -12,4 +12,5 @@ vsc-extension-quickstart.md
 test/**
 out/test/**
 out/test-unit/**
+out/live-logs/**
 **/tsconfig.*.json

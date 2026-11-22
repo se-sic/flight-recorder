@@ -14,6 +14,7 @@ import {
   sleep,
   startRecording,
   stopRecording,
+  configureOpenCodePlugin,
   stubDialogs,
   waitFor,
   within,
@@ -23,22 +24,6 @@ const PLUGIN = ".opencode/plugins/flight-recorder.ts";
 const LOG = ".opencode/flight-recorder-events.jsonl";
 const SESSION = "ses_e2e";
 
-/** Runs "Configure OpenCode Plugin", confirming its dialog. */
-async function configureOpenCodePlugin(): Promise<void> {
-  const stub = stubDialogs({
-    "OpenCode plugin to": "Configure OpenCode Plugin",
-    "configured the OpenCode plugin": "OK",
-  });
-  try {
-    await within(
-      vscode.commands.executeCommand("flightRecorder.configureOpenCodePlugin"),
-      10_000,
-      "the Configure OpenCode Plugin command"
-    );
-  } finally {
-    stub.restore();
-  }
-}
 
 /** Appends one record to the plugin log, like the generated OpenCode plugin does. */
 function appendRecord(record: Record<string, unknown>): void {
