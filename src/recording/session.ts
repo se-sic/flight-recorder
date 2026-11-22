@@ -40,6 +40,7 @@ import {
 } from "./staging-tracker";
 import { getClaudeSourceMode } from "./agents/claude/config";
 import { getLogChannel } from "../utils/logging";
+import { branchExists } from "../history-panel/history";
 import { getWorkspaceRepoRoot, workspaceRootPath } from "../utils/paths";
 import { normalizePath, relativePathInside, samePath, uriToPath } from "../utils/fs-path";
 import { EXTENSION_NAME } from "../utils/constants";
@@ -187,7 +188,14 @@ export async function getPanelBranchState(): Promise<RecordingBranchUiState | nu
   }
 
   const sourceBranchName = await readSourceBranchName(repoRoot);
-  if (last?.commitMode === "trackingWorktree" && last.sourceBranchName === sourceBranchName) {
+  // A remembered active branch is gone when the recording was finalized while
+  // VS Code shut down (the new state could not be saved then) or recovered
+  // since; show the final branch instead.
+  if (
+    last?.commitMode === "trackingWorktree" &&
+    last.sourceBranchName === sourceBranchName &&
+    (last.finalized || !last.displayBranchName || await branchExists(repoRoot, last.displayBranchName))
+  ) {
     return last;
   }
   const finalBranchName = recordingBranchName(
