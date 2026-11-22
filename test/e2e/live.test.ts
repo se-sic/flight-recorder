@@ -89,8 +89,7 @@ function claude(prompt: string): Promise<string> {
 }
 
 /** Sends one prompt to OpenCode with its own private server, auto-approving permissions. */
-function opencode(prompt: string): Promise<string> {
-  const model = process.env.FR_LIVE_OPENCODE_MODEL;
+function opencode(prompt: string, model = process.env.FR_LIVE_OPENCODE_MODEL): Promise<string> {
   return run("opencode", ["run", "--standalone", "--auto", ...(model ? ["--model", model] : []), prompt], 300_000);
 }
 
@@ -189,6 +188,10 @@ function keepLogs(name: string, rels: string[]): void {
     for (const kind of ["setup", "pre", "post", "step"]) {
       assert.ok(kinds.has(kind), `plugin wrote a ${kind} record (kinds: ${[...kinds].join(", ")})`);
     }
+    // B0: the plugin was loaded for this repository by OpenCode 2.x.
+    const setup = records.find((record) => record.kind === "setup");
+    assert.equal(fs.realpathSync(setup.directory), fs.realpathSync(repoRoot()));
+    assert.match(String(setup.app?.version), /^2\./);
     // `opencode run --standalone` stops its server right after the answer, so
     // the end-of-run (`idle`) record may be missing; the TUI writes it.
     if (!kinds.has("idle")) {
@@ -201,7 +204,52 @@ function keepLogs(name: string, rels: string[]): void {
     const edit = commitsFor(commits, "index.js");
     assert.equal(edit.length, 1, summary);
     assert.match(edit[0].subject, /Flight Recorder: assistant/, summary);
+    // B2: index.js was never open in an editor, so only the diff evidence counts.
+    assert.match(edit[0].body, /"path":"index.js","origin":"assistant-tool-edit","confidence":"medium"/, edit[0].body);
     assert.ok(commitsFor(commits, "notes.txt").every((c) => /assistant/.test(c.subject)) && commitsFor(commits, "notes.txt").length === 1, summary);
     assert.ok(commits.some((commit) => commit.files.some((file) => file.startsWith(".log/opencode"))), summary);
+  });
+
+  test("OpenCode with a GPT model: edits and new files are the assistant's (patch tool if the model gets it)", async function () {
+    this.timeout(900_000);
+    // Default: the local gpt-oss through Ollama (free; OpenCode gives it edit/write).
+    // Hosted OpenAI GPT models get the `patch` tool; set FR_LIVE_OPENCODE_PATCH_MODEL
+    // to one your Copilot plan allows for OpenCode.
+    const model = process.env.FR_LIVE_OPENCODE_PATCH_MODEL ?? "ollama/gpt-oss:20b";
+    if (model.startsWith("ollama/") && !(await fetch("http://127.0.0.1:11434/api/tags").then((res) => res.ok, () => false))) {
+      this.skip();
+    }
+    await configureOpenCodePlugin();
+    dialogs = stubDialogs({});
+    await startRecording();
+
+    // GPT models edit through OpenCode's `patch` tool instead of `edit`.
+    await opencode(
+      "Add the line `// patched` as the very first line of index.js, and create a new file hello.txt containing the single line `hello`. Change nothing else.",
+      model
+    );
+    await sleep(3_000);
+    await stopRecording();
+    keepLogs("opencode-patch", [OPENCODE_LOG]);
+
+    const records = fs.readFileSync(path.join(repoRoot(), OPENCODE_LOG), "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    const tools = [...new Set(records.filter((record) => record.kind === "pre").map((record) => record.tool))];
+    console.log(`Live GPT run (${model}) used the tools: ${tools.join(", ")}`);
+    // B3: a file the model creates with `write` is reported as new.
+    const writes = records.filter((record) => record.kind === "post" && record.tool === "write" && /hello\.txt$/.test(String(record.input?.path ?? record.input?.filePath)));
+    for (const write of writes) {
+      assert.equal(write.output?.existed, false, JSON.stringify(write.output));
+    }
+    if (tools.includes("patch")) {
+      assert.ok(records.some((record) => record.kind === "post" && record.tool === "patch"), "patch post record");
+    }
+    const commits = recordedCommitsWithFiles();
+    const summary = commits.map((commit) => `${commit.subject}: ${commit.files.join(", ")}`).join("\n");
+    for (const file of ["index.js", "hello.txt"]) {
+      const touching = commitsFor(commits, file);
+      assert.equal(touching.length, 1, `${file}\n${summary}`);
+      assert.match(touching[0].subject, /Flight Recorder: assistant/, summary);
+    }
+    assert.match(fs.readFileSync(path.join(repoRoot(), "index.js"), "utf8"), /^\/\/ patched/);
   });
 });

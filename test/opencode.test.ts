@@ -574,6 +574,8 @@ test("generated OpenCode plugin writes records the parser understands", async ()
     const { ctx, hooks, subscribedTypes } = fakePluginContext(repo, [
       { type: "session.step.ended", location: { directory: repo }, data: { sessionID: SESSION, assistantMessageID: "msg_1", files: ["b.js"], snapshot: "s1" } },
       { type: "session.step.ended", location: { directory: "/elsewhere" }, data: { sessionID: "other", assistantMessageID: "msg_x", files: ["x.js"] } },
+      { type: "session.execution.succeeded", location: { directory: "/elsewhere" }, data: { sessionID: "other" } },
+      { type: "session.step.ended", location: { directory: `${repo}-sibling` }, data: { sessionID: "sibling", assistantMessageID: "msg_s", files: ["s.js"] } },
       { type: "session.execution.succeeded", location: { directory: repo }, data: { sessionID: SESSION } },
     ]);
     const plugin = (await import(pathToFileURL(pluginPath).href)).default;
