@@ -178,6 +178,16 @@ export async function resetRepo(): Promise<void> {
   }
   fs.mkdirSync(path.join(root, ".claude"), { recursive: true });
   fs.writeFileSync(path.join(root, HOOK_LOG), "");
+  // Documents an earlier test opened stay loaded after their editors close.
+  // Wait until VS Code has reloaded them from the reset files, so their
+  // change events do not land in the next test's recording.
+  await waitFor(
+    () => vscode.workspace.textDocuments.every((document) =>
+      document.uri.scheme !== "file" || !fs.existsSync(document.uri.fsPath) ||
+      document.getText() === fs.readFileSync(document.uri.fsPath, "utf8")),
+    "open documents to match the reset files"
+  );
+  await sleep(300);
 }
 
 /** Runs "Configure Claude Hooks" for local scope, answering its dialogs. */

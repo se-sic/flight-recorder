@@ -249,6 +249,7 @@
     "test": "vscode-test",
     "test:e2e": "npm test",
     "test:live": "npm run pretest && FR_LIVE=1 vscode-test --grep \"Live assistants\"",
+    "test:ui": "npm run compile && tsc -p tsconfig.test.json && node --test --test-concurrency=1 out/test-unit/test/ui/*.ui.js",
     "test:unit": "tsc -p tsconfig.test.json && node --test out/test-unit/test/**/*.test.js"
   },
   "devDependencies": {

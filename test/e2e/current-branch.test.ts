@@ -61,7 +61,7 @@ suite("E6 current-branch mode", () => {
     assert.deepEqual(commits.slice(1), [
       "Flight Recorder: assistant tool edit (1 file)",
       "Flight Recorder: human edits (1 file)",
-    ]);
+    ], git(root, "log", "-1", "--format=%B", "main~2"));
     const committedFiles = git(root, "log", "--name-only", "--format=", "e2e-base..main").split("\n");
     assert.equal(committedFiles.includes("staged.txt"), false);
     assert.equal(git(root, "diff", "--cached", "--name-only"), "staged.txt");
