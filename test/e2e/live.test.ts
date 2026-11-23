@@ -77,14 +77,14 @@ function strayFiles(): string[] {
   return ["notes.txt", "index.js"].filter((name) => fs.existsSync(path.join(checkout, name)));
 }
 
-/** Sends one prompt to Claude Code in print mode, allowing edits and simple shell commands. */
-function claude(prompt: string): Promise<string> {
+/** Sends one prompt to Claude Code in print mode, allowing edits and simple shell commands (or only `tools`). */
+function claude(prompt: string, tools = "Read,Edit,Write,Bash(echo:*),Bash(cat:*)"): Promise<string> {
   return run("claude", [
     "-p", prompt,
     "--model", process.env.FR_LIVE_CLAUDE_MODEL ?? "haiku",
-    "--permission-mode", "acceptEdits",
-    "--allowedTools", "Read,Edit,Write,Bash(echo:*),Bash(cat:*)",
-    "--max-turns", "6",
+    ...(tools.includes("Edit") ? ["--permission-mode", "acceptEdits"] : []),
+    "--allowedTools", tools,
+    "--max-turns", "4",
   ], 180_000);
 }
 
@@ -247,5 +247,27 @@ function keepLogs(name: string, rels: string[]): void {
       assert.match(touching[0].subject, /Flight Recorder: assistant/, summary);
     }
     assert.match(fs.readFileSync(path.join(repoRoot(), "index.js"), "utf8"), /^\/\/ patched/);
+  });
+
+  test("Claude Code: a denied edit leaves the participant's later edit of that file human", async function () {
+    this.timeout(600_000);
+    await configureClaudeHooks();
+    dialogs = stubDialogs({});
+    await startRecording();
+
+    // Without permission for Edit, print mode denies the edit like a participant would.
+    await claude("Use your Edit tool to add the line `// denied` as the first line of index.js.", "Read").catch((err) => console.log(String(err).slice(0, 300)));
+    await sleep(3_000);
+    await humanEdit("index.js", "// written by the participant\n");
+    await sleep(3_000);
+    await stopRecording();
+    keepLogs("claude-denied", [HOOK_LOG]);
+
+    const hooks = fs.readFileSync(path.join(repoRoot(), HOOK_LOG), "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    console.log(`Denied-edit run hooks: ${hooks.map((hook) => `${hook.hook_event_name}${hook.tool_name ? ` ${hook.tool_name}` : ""}`).join(", ")}`);
+    const commits = recordedCommitsWithFiles();
+    const summary = commits.map((commit) => `${commit.subject}: ${commit.files.join(", ")}`).join("\n");
+    assert.doesNotMatch(fs.readFileSync(path.join(repoRoot(), "index.js"), "utf8"), /\/\/ denied/);
+    assert.deepEqual(commitsFor(commits, "index.js").map((commit) => commit.subject), ["Flight Recorder: human edits (1 file)"], summary);
   });
 });

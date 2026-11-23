@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import {
+  appendHook,
   claudeBash,
   claudeEdit,
   claudeRead,
@@ -196,5 +197,22 @@ suite("E2/E3 Claude hook recording", () => {
     assert.ok(commits.includes("Flight Recorder: human edits (1 file)"), commits.join("\n"));
     assert.match(showFile("flight-recorder/main", "readme.md"), /edited right before a reload/);
     assert.deepEqual(listBranches(repoRoot()).filter((name) => name.includes("-active/")), []);
+  });
+
+  test("an edit the participant rejects does not turn their later edit of that file into an assistant edit", async () => {
+    await configureClaudeHooks();
+    await startRecording();
+    const toolInput = { file_path: path.join(repoRoot(), "index.js"), old_string: "module.exports = 1;", new_string: "module.exports = 2;" };
+    // Claude announces the edit, the participant rejects it: no change, no PostToolUse.
+    appendHook({ hook_event_name: "PreToolUse", tool_name: "Edit", tool_use_id: "rejected", tool_input: toolInput });
+    await sleep(500);
+    appendHook({ hook_event_name: "Stop" });
+    await sleep(2_000);
+    await humanEdit("index.js", "// the participant's own change\n");
+    await sleep(1_500);
+    await stopRecording();
+
+    assert.deepEqual(recordedCommits("flight-recorder/main").slice(1), ["Flight Recorder: human edits (1 file)"]);
+    assert.match(showFile("flight-recorder/main", "index.js"), /the participant's own change/);
   });
 });

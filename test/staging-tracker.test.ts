@@ -657,3 +657,43 @@ test("an edit event naming one file does not claim unrelated on-disk changes", (
 
   assert.deepEqual(human.files, resolved("/tmp/other.txt"));
 });
+
+test("an edit Claude announced but never made (rejected) does not claim later human edits", () => {
+  const parser = new ClaudeCodeParser();
+  const parse = (payload: Record<string, unknown>) => Array.from(parser.feed(`${JSON.stringify(payload)}\n`));
+  const toolInput = { file_path: "/tmp/rejected.ts", old_string: "a", new_string: "b" };
+  const tracker = new FineGrainedStagingTracker(1000);
+  const commits = [];
+
+  for (const event of parse({ hook_event_name: "PreToolUse", tool_name: "Edit", tool_input: toolInput })) {
+    commits.push(...tracker.recordAssistantEvent(event, 1_000));
+  }
+  // The participant rejects the edit: no PostToolUse, no file change, the turn ends.
+  for (const event of parse({ hook_event_name: "Stop" })) {
+    commits.push(...tracker.recordAssistantEvent(event, 1_500));
+  }
+  const idle = tracker.flushAssistantWindowIfIdle(3_000);
+  tracker.recordTextDocumentChange(
+    [{ path: "/tmp/rejected.ts", insertedTextHashes: [], insertedTextLength: 1, ranges: [], text: "manual" }],
+    10_000
+  );
+  commits.push(...tracker.flushAll(20_000));
+
+  assert.equal(idle, null, "the unmaterialized window is dropped without a commit");
+  assert.deepEqual(commits.map((commit) => [commit.kind, commit.files]), [["human", resolved("/tmp/rejected.ts")]]);
+});
+
+test("without a turn end, an announced edit stops waiting after the safety limit", () => {
+  const tracker = new FineGrainedStagingTracker(1000);
+  tracker.recordAssistantEvent(makeAssistantEvent({ kind: "tool-called", capability: "tool-call", fileOperations: [{ kind: "update", path: "/tmp/never.ts" }] }), 1_000);
+
+  // Still waiting a minute later, then dropped after the five-minute limit.
+  assert.equal(tracker.flushAssistantWindowIfIdle(60_000), null);
+  assert.equal(tracker.flushAssistantWindowIfIdle(6 * 60_000), null);
+  tracker.recordTextDocumentChange(
+    [{ path: "/tmp/never.ts", insertedTextHashes: [], insertedTextLength: 1, ranges: [], text: "y" }],
+    6 * 60_000 + 100
+  );
+
+  assert.deepEqual(tracker.flushAll(7 * 60_000).map((commit) => [commit.kind, commit.files]), [["human", resolved("/tmp/never.ts")]]);
+});

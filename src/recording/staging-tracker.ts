@@ -97,6 +97,8 @@ type AssistantWindowState = {
   events: AssistantEvent[];
   fileAttributions: Map<string, FileAttribution>;
   awaitingMaterialization: boolean;
+  /** Set when the assistant's turn ended; an edit still awaited then will not come. */
+  turnEnded: boolean;
   /** Claims every workspace change, because an event named no files or ran a tool that can change anything. */
   openEnded: boolean;
   /** Tools reported as started but not yet finished (see `AssistantEvent.toolCall`). */
@@ -432,7 +434,10 @@ export class FineGrainedStagingTracker {
     if (phase === "started") {
       state.runningTools.add(id ?? `${event.timestamp}:${state.runningTools.size}`);
     } else if (id === undefined) {
+      // The turn is over: no tool is running any more, and an announced edit
+      // that has not appeared yet will not come (e.g. it was rejected).
       state.runningTools.clear();
+      state.turnEnded = true;
     } else {
       state.runningTools.delete(id);
     }
@@ -680,6 +685,7 @@ export class FineGrainedStagingTracker {
         events: [],
         fileAttributions: new Map<string, FileAttribution>(),
         awaitingMaterialization,
+        turnEnded: false,
         openEnded: false,
         runningTools: new Set<string>(),
         materializations: [],
@@ -688,6 +694,7 @@ export class FineGrainedStagingTracker {
 
     this.assistantState.lastActivityAt = at;
     this.assistantState.events.push(event);
+    this.assistantState.turnEnded = false;
     this.applyToolCallPhase(event);
     if (claimsEverything) {
       this.assistantState.openEnded = true;
@@ -735,8 +742,12 @@ export class FineGrainedStagingTracker {
       return null;
     }
 
+    // A window still awaiting its announced edit changed nothing; once the
+    // turn has ended (or after the safety limit) it is dropped without a commit.
     if (
-      this.assistantState.awaitingMaterialization ||
+      (this.assistantState.awaitingMaterialization &&
+        !this.assistantState.turnEnded &&
+        at - this.assistantState.lastActivityAt < MAX_TOOL_RUN_IDLE_MS) ||
       (this.assistantDebounceMs > 0 &&
         at - this.assistantState.lastActivityAt < this.assistantDebounceMs)
     ) {
