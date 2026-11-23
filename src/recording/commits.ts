@@ -343,6 +343,17 @@ async function gitBranchExists(
 }
 
 /**
+ * Returns the repository's top-level folder for `folder`, which may be a
+ * subfolder (e.g. a workspace opened at `repo/frontend`). It is derived from
+ * `folder` so that symlinked spellings (macOS `/var`) stay the same as in the
+ * paths VS Code reports.
+ */
+async function repositoryRoot(folder: string): Promise<string> {
+  const res = await gitCmd(["rev-parse", "--show-cdup"], folder);
+  return normalizePath(folder, res.code === 0 ? res.out.trim() : "");
+}
+
+/**
  * Resolves where Flight Recorder should create commits. In tracking-worktree
  * mode this creates or reuses a hidden worktree on a dedicated branch under
  * the repository's common git directory, so user branch/index state is isolated.
@@ -355,7 +366,7 @@ export async function prepareRecordingCommitTarget(
   | { ok: true; target: RecordingCommitTarget }
   | { ok: false; kind: GitFailureKind; msg: string; err: string }
 > {
-  const sourceRoot = normalizePath(repoRoot);
+  const sourceRoot = await repositoryRoot(repoRoot);
   if (options.mode === "currentBranch") {
     return {
       ok: true,
@@ -1300,29 +1311,31 @@ export async function commitTrackedWindow(
   target?: RecordingCommitTarget
 ): Promise<GitActionResult> {
   const commitTarget = targetOrDefault(repoRoot, target);
-  // Relative paths here keep native separators; git accepts both.
+  // Paths are relative to the repository root, which can lie above the
+  // opened folder. Relative paths keep native separators; git accepts both.
+  const root = commitTarget.sourceRoot;
   const relFiles = Array.from(
     new Set(
       commit.files
-        .map((filePath) => relativePathInside(repoRoot, filePath))
+        .map((filePath) => relativePathInside(root, filePath))
         .filter((rel): rel is string => !!rel)
         .map((rel) => rel.split("/").join(path.sep))
     )
   );
 
   const snapshots = commit.kind === "human" ? commit.snapshots : undefined;
-  const hasSnapshot = (rel: string) => snapshots?.[normalizePath(repoRoot, rel)] !== undefined;
+  const hasSnapshot = (rel: string) => snapshots?.[normalizePath(root, rel)] !== undefined;
   // Ignored files (e.g. `.env`) are never recorded; staging them would also
   // fail the whole commit. Transient files (created and removed again within
   // the window) are left out too, unless an editor snapshot holds their text.
   const notIgnored = await withoutIgnoredPaths(commitTarget.commitRoot, relFiles);
   const present = new Set(
-    await withoutUnknownMissingPaths(repoRoot, notIgnored, commitTarget.commitRoot)
+    await withoutUnknownMissingPaths(root, notIgnored, commitTarget.commitRoot)
   );
   const stageableFiles = notIgnored.filter((rel) => present.has(rel) || hasSnapshot(rel));
 
   // The commit metadata lists only what is actually recorded.
-  const recorded = new Set(stageableFiles.map((rel) => normalizePath(repoRoot, rel)));
+  const recorded = new Set(stageableFiles.map((rel) => normalizePath(root, rel)));
   const isRecorded = (filePath: string) => recorded.has(normalizePath(filePath));
   const recordedCommit: WindowCommit = commit.kind === "assistant"
     ? {
@@ -1331,13 +1344,13 @@ export async function commitTrackedWindow(
       fileAttributions: commit.fileAttributions.filter((attribution) => isRecorded(attribution.path)),
     }
     : { ...commit, files: commit.files.filter(isRecorded) };
-  const msg = formatWindowCommitMessage(recordedCommit, repoRoot);
+  const msg = formatWindowCommitMessage(recordedCommit, root);
   const ts = new Date(commit.endedAt).toISOString();
   if (snapshots && !dryRun && !addAll && commitTarget.mode === "currentBranch") {
-    return commitWithSnapshots(repoRoot, msg, stageableFiles, snapshots);
+    return commitWithSnapshots(root, msg, stageableFiles, snapshots);
   }
   return stageAndCommit(
-    repoRoot,
+    root,
     msg,
     ts,
     stageableFiles,

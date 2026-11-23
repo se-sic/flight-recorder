@@ -302,3 +302,31 @@ test("commit metadata lists only recorded files, not ignored or transient ones",
   assert.match(message, /"files":\["README.md"\]/);
   assert.doesNotMatch(message, /\.env|index\.js\.tmp/);
 });
+
+for (const mode of ["trackingWorktree", "currentBranch"] as const) {
+  test(`a workspace opened at a subfolder records paths relative to the repository root (${mode})`, async () => {
+    const repo = makeRepo();
+    const sub = path.join(repo, "frontend");
+    fs.mkdirSync(sub);
+    fs.writeFileSync(path.join(sub, "app.ts"), "a\n");
+    git(repo, "add", ".");
+    git(repo, "commit", "-q", "-m", "add frontend");
+    const prepared = await prepareRecordingCommitTarget(sub, false, { mode, trackingBranchPrefix: "flight-recorder" });
+    assert.ok(prepared.ok);
+
+    fs.writeFileSync(path.join(sub, "app.ts"), "a\nhuman\n");
+    fs.writeFileSync(path.join(repo, "root.txt"), "edited outside the opened folder\n");
+    const commit: WindowCommit = {
+      kind: "human",
+      files: [path.join(sub, "app.ts"), path.join(repo, "root.txt")],
+      startedAt: 0,
+      endedAt: 1,
+    };
+    const res = await commitTrackedWindow(sub, commit, false, false, false, prepared.target);
+
+    assert.equal(res.ok, true, res.msg);
+    const branch = mode === "trackingWorktree" && prepared.target.mode === "trackingWorktree" ? prepared.target.activeBranchName : "HEAD";
+    assert.deepEqual(git(repo, "show", "--name-only", "--format=", branch).split("\n").sort(), ["frontend/app.ts", "root.txt"]);
+    assert.match(git(repo, "log", "-1", "--format=%B", branch), /"files":\["frontend\/app.ts","root.txt"\]/);
+  });
+}
