@@ -201,8 +201,20 @@ export class VsCodeWindow {
 
   /** Runs a command by its title through the command palette, like a user. */
   async runCommand(title: string): Promise<void> {
-    await this.press("F1", "F1", 112);
-    await waitFor(() => this.evaluate<boolean>("!!document.querySelector('.quick-input-widget:not([style*=\"display: none\"]) input')"), "the command palette");
+    const paletteOpen = () => this.evaluate<boolean>("!!document.querySelector('.quick-input-widget:not([style*=\"display: none\"]) input')");
+    // Right after a launch the window may not have keyboard focus yet; retry.
+    for (let attempt = 1; ; attempt++) {
+      await this.page!.send("Page.bringToFront");
+      await this.press("F1", "F1", 112);
+      try {
+        await waitFor(paletteOpen, "the command palette", 5_000);
+        break;
+      } catch (err) {
+        if (attempt === 4) {
+          throw err;
+        }
+      }
+    }
     await this.type(title);
     await waitFor(
       () => this.evaluate<boolean>(`[...document.querySelectorAll('.quick-input-list .monaco-list-row')].some((row) => row.innerText.includes(${JSON.stringify(title)}))`),
