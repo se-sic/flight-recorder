@@ -574,9 +574,11 @@ test("generated OpenCode plugin writes records the parser understands", async ()
     const { ctx, hooks, subscribedTypes } = fakePluginContext(repo, [
       { type: "session.step.ended", location: { directory: repo }, data: { sessionID: SESSION, assistantMessageID: "msg_1", files: ["b.js"], snapshot: "s1" } },
       { type: "session.step.ended", location: { directory: "/elsewhere" }, data: { sessionID: "other", assistantMessageID: "msg_x", files: ["x.js"] } },
-      { type: "session.execution.succeeded", location: { directory: "/elsewhere" }, data: { sessionID: "other" } },
+      { type: "session.execution.succeeded", data: { sessionID: "other" } },
       { type: "session.step.ended", location: { directory: `${repo}-sibling` }, data: { sessionID: "sibling", assistantMessageID: "msg_s", files: ["s.js"] } },
-      { type: "session.execution.succeeded", location: { directory: repo }, data: { sessionID: SESSION } },
+      // OpenCode 2.2.2 sends run-end events without a location; they match by session.
+      { type: "session.execution.succeeded", data: { sessionID: SESSION } },
+      { type: "session.execution.succeeded", data: { sessionID: "never-seen-here" } },
     ]);
     const plugin = (await import(pathToFileURL(pluginPath).href)).default;
     const dispose = await plugin.setup(ctx);

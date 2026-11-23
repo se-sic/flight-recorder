@@ -2,7 +2,7 @@
  * Version of the JSONL record format written by the generated plugin. Bump it
  * whenever the plugin source changes so existing installs are flagged as stale.
  */
-export const OPENCODE_PLUGIN_SCHEMA_VERSION = 3;
+export const OPENCODE_PLUGIN_SCHEMA_VERSION = 4;
 
 /** Repo-relative path of the generated plugin (OpenCode auto-loads `.opencode/plugins/*.ts`). */
 export const OPENCODE_PLUGIN_RELATIVE_PATH = ".opencode/plugins/flight-recorder.ts";
@@ -63,7 +63,12 @@ function insideRepo(directory) {
   return dir === ROOT || dir.startsWith(ROOT + "/") || dir.startsWith(ROOT + "\\\\")
 }
 
+// Run-end events carry no location, so they are matched to this repository
+// by the sessions seen here (tool calls and steps inside the repository).
+const repoSessions = new Set()
+
 function call(e) {
+  if (e.sessionID) repoSessions.add(e.sessionID)
   return { tool: e.tool, sessionID: e.sessionID, messageID: e.messageID, callID: e.id, agent: e.agent, input: e.input }
 }
 
@@ -99,8 +104,9 @@ export default {
       try {
         const types = ["session.step.ended", ...Object.keys(RUN_ENDED)]
         for await (const ev of ctx.event.subscribe({ types, signal: abort.signal })) {
-          if (!insideRepo(ev.location?.directory)) continue
           const data = ev.data ?? {}
+          if (ev.location ? !insideRepo(ev.location.directory) : !repoSessions.has(data.sessionID)) continue
+          if (data.sessionID) repoSessions.add(data.sessionID)
           if (RUN_ENDED[ev.type]) {
             record("idle", { sessionID: data.sessionID, outcome: RUN_ENDED[ev.type], reason: data.reason })
             continue

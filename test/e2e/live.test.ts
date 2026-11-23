@@ -185,18 +185,14 @@ function keepLogs(name: string, rels: string[]): void {
 
     const records = fs.readFileSync(path.join(repoRoot(), OPENCODE_LOG), "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
     const kinds = new Set(records.map((record) => record.kind));
-    for (const kind of ["setup", "pre", "post", "step"]) {
+    for (const kind of ["setup", "pre", "post", "step", "idle"]) {
       assert.ok(kinds.has(kind), `plugin wrote a ${kind} record (kinds: ${[...kinds].join(", ")})`);
     }
+    assert.ok(records.some((record) => record.kind === "idle" && record.outcome === "succeeded"), "run end recorded");
     // B0: the plugin was loaded for this repository by OpenCode 2.x.
     const setup = records.find((record) => record.kind === "setup");
     assert.equal(fs.realpathSync(setup.directory), fs.realpathSync(repoRoot()));
     assert.match(String(setup.app?.version), /^2\./);
-    // `opencode run --standalone` stops its server right after the answer, so
-    // the end-of-run (`idle`) record may be missing; the TUI writes it.
-    if (!kinds.has("idle")) {
-      console.log("Live OpenCode run wrote no idle record (expected for opencode run).");
-    }
 
     const commits = recordedCommitsWithFiles();
     const summary = commits.map((commit) => `${commit.subject}: ${commit.files.join(", ")}`).join("\n");

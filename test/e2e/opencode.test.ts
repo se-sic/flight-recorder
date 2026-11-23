@@ -30,7 +30,7 @@ const SESSION = "ses_e2e";
 function appendRecord(record: Record<string, unknown>): void {
   fs.appendFileSync(
     path.join(repoRoot(), LOG),
-    `${JSON.stringify({ fr: 3, ts: Date.now(), sessionID: SESSION, ...record })}\n`
+    `${JSON.stringify({ fr: 4, ts: Date.now(), sessionID: SESSION, ...record })}\n`
   );
 }
 
@@ -122,7 +122,7 @@ suite("OpenCode plugin recording", () => {
   test("Configure OpenCode Plugin installs the plugin and keeps git status clean", async () => {
     const root = repoRoot();
     assert.ok(fs.existsSync(path.join(root, PLUGIN)));
-    assert.match(fs.readFileSync(path.join(root, PLUGIN), "utf8"), /flight-recorder-plugin-schema: 3/);
+    assert.match(fs.readFileSync(path.join(root, PLUGIN), "utf8"), /flight-recorder-plugin-schema: 4/);
     const exclude = fs.readFileSync(path.join(root, ".git", "info", "exclude"), "utf8");
     assert.match(exclude, /\.opencode\/plugins\/flight-recorder\.ts/);
     assert.match(exclude, /\.opencode\/flight-recorder-events\.jsonl/);
@@ -289,7 +289,7 @@ suite("OpenCode plugin recording", () => {
     });
 
     await startRecording();
-    await waitFor(() => /flight-recorder-plugin-schema: 3/.test(fs.readFileSync(pluginPath, "utf8")), "the updated plugin");
+    await waitFor(() => /flight-recorder-plugin-schema: 4/.test(fs.readFileSync(pluginPath, "utf8")), "the updated plugin");
     await openCodeEdit("index.js", "// after the plugin update\nmodule.exports = 1;\n");
     await waitForAssistantCommit();
     await stopRecording();
@@ -343,4 +343,5 @@ suite("OpenCode plugin recording", () => {
     assert.doesNotMatch(showFile("flight-recorder/main~2", "index.js"), /opencode line/);
     assert.equal(showFile("flight-recorder/main", "index.js"), fs.readFileSync(path.join(root, "index.js"), "utf8").trimEnd());
   });
+
 });
