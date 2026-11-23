@@ -608,3 +608,52 @@ test("disk changes reported for ordinary saves keep the human snapshot", () => {
 
   assert.deepEqual(human.kind === "human" && human.snapshots, { [file]: "human text" });
 });
+
+/** A shell tool run starting, as Claude's PreToolUse Bash or OpenCode's `pre` shell record. */
+function shellStarted(): AssistantEvent {
+  return makeAssistantEvent({
+    kind: "tool-called",
+    capability: "command",
+    fileOperations: [],
+    toolCall: { id: "shell-1", phase: "started" },
+  });
+}
+
+test("a shell run claims on-disk changes the watcher reported just before its log line", () => {
+  const tracker = new FineGrainedStagingTracker(1000);
+  tracker.recordTextDocumentChange(
+    [{ path: "/tmp/typed.md", insertedTextHashes: [], insertedTextLength: 5, ranges: [], text: "typed" }],
+    500
+  );
+  // The command wrote notes.txt; the watcher saw it 150 ms before the log line was read.
+  tracker.recordDiskChange(["/tmp/notes.txt"], 1_000);
+
+  const [human] = tracker.recordAssistantEvent(shellStarted(), 1_150);
+  const commits = tracker.flushAll(10_000);
+
+  assert.deepEqual(human.files, resolved("/tmp/typed.md"));
+  assert.deepEqual(commits.map((commit) => [commit.kind, commit.files]), [["assistant", resolved("/tmp/notes.txt")]]);
+});
+
+test("a shell run leaves older on-disk changes and editor-typed files with the human", () => {
+  const tracker = new FineGrainedStagingTracker(1000);
+  tracker.recordDiskChange(["/tmp/generated-earlier.txt"], 1_000);
+  tracker.recordTextDocumentChange(
+    [{ path: "/tmp/typed.md", insertedTextHashes: [], insertedTextLength: 5, ranges: [], text: "typed" }],
+    5_900
+  );
+  tracker.recordDiskChange(["/tmp/typed.md"], 5_950); // the save
+
+  const [human] = tracker.recordAssistantEvent(shellStarted(), 6_000);
+
+  assert.deepEqual(human.files, resolved("/tmp/generated-earlier.txt", "/tmp/typed.md"));
+});
+
+test("an edit event naming one file does not claim unrelated on-disk changes", () => {
+  const tracker = new FineGrainedStagingTracker(1000);
+  tracker.recordDiskChange(["/tmp/other.txt"], 1_000);
+
+  const [human] = tracker.recordAssistantEvent(makeAssistantEvent({ fileOperations: [{ kind: "update", path: "/tmp/demo.ts" }] }), 1_100);
+
+  assert.deepEqual(human.files, resolved("/tmp/other.txt"));
+});

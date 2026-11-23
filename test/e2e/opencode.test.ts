@@ -344,4 +344,23 @@ suite("OpenCode plugin recording", () => {
     assert.equal(showFile("flight-recorder/main", "index.js"), fs.readFileSync(path.join(root, "index.js"), "utf8").trimEnd());
   });
 
+  test("a shell change the watcher reports before its log line is read is still the assistant's", async () => {
+    const root = repoRoot();
+    await startRecording();
+    await humanEdit("readme.md", "\nhuman before the command\n");
+    await sleep(1_500);
+    // A fast command: the file changes before Flight Recorder reads the run's records.
+    fs.writeFileSync(path.join(root, "notes.txt"), "fast\n");
+    await sleep(150);
+    const shared = { tool: "shell", messageID: "msg_fast", callID: "call_fast", agent: "build", input: { command: "echo fast > notes.txt" } };
+    appendRecord({ kind: "pre", ...shared });
+    appendRecord({ kind: "post", ...shared, status: "completed" });
+    appendRecord({ kind: "step", messageID: "msg_fast", files: ["notes.txt"], snapshot: "snap" });
+    appendRecord({ kind: "idle", outcome: "succeeded" });
+    await waitForAssistantCommit();
+    await stopRecording();
+
+    assert.match(subjectFor("readme.md"), /^Flight Recorder: human edits/);
+    assert.match(subjectFor("notes.txt"), /^Flight Recorder: assistant/);
+  });
 });

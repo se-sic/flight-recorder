@@ -52,6 +52,11 @@ type TextSnapshot = { at: number; text: string };
  * parsed. Human text older than this is safe to attribute to the human.
  */
 const ASSISTANT_EVENT_LAG_MS = 1_000;
+/**
+ * How far back a tool run that names no files (a shell command) claims
+ * on-disk changes the file watcher reported before the run's log line was read.
+ */
+const RECENT_DISK_CHANGE_MS = 2_000;
 
 /**
  * How long an assistant window waits for a running tool's completion signal
@@ -80,6 +85,8 @@ type HumanWindowState = {
   endedAt: number | null;
   /** Recent document texts per file, oldest first. */
   texts: Map<string, TextSnapshot[]>;
+  /** When each file last changed on disk, for changes no editor text accounts for. */
+  diskChanges: Map<string, number>;
 };
 
 type AssistantWindowState = {
@@ -398,6 +405,7 @@ export class FineGrainedStagingTracker {
     startedAt: null,
     endedAt: null,
     texts: new Map<string, TextSnapshot[]>(),
+    diskChanges: new Map<string, number>(),
   };
 
   private assistantState: AssistantWindowState | null = null;
@@ -451,7 +459,11 @@ export class FineGrainedStagingTracker {
    * because a watcher also reports every ordinary save.
    */
   recordDiskChange(paths: Iterable<string>, at = Date.now()): void {
-    this.routePathChanges(normalizePaths(paths), at);
+    const normalized = normalizePaths(paths);
+    for (const filePath of normalized) {
+      this.humanState.diskChanges.set(filePath, at);
+    }
+    this.routePathChanges(normalized, at);
   }
 
   /** Assigns changed paths to the open assistant window when it claims them, otherwise to the human window. */
@@ -614,6 +626,22 @@ export class FineGrainedStagingTracker {
     const commits: WindowCommit[] = [];
     const assistantPaths = normalizePaths(collectEventFilePaths(event));
     const snapshots: Record<string, string> = {};
+    const claimsEverything = assistantPaths.length === 0 || event.capability === "command" || !!event.toolCall;
+
+    // A fast shell command can change files before its log line is read, so
+    // the watcher reports them as human changes first. Files the human did
+    // not edit in the editor and that changed just now belong to the run.
+    const claimedFromHuman = claimsEverything
+      ? Array.from(this.humanState.diskChanges)
+        .filter(([filePath, changedAt]) =>
+          this.humanState.files.has(filePath) &&
+          !this.humanState.texts.has(filePath) &&
+          at - changedAt <= RECENT_DISK_CHANGE_MS)
+        .map(([filePath]) => filePath)
+      : [];
+    for (const filePath of claimedFromHuman) {
+      this.humanState.files.delete(filePath);
+    }
 
     for (const filePath of assistantPaths) {
       const settled = (this.humanState.texts.get(filePath) ?? []).filter(
@@ -639,6 +667,7 @@ export class FineGrainedStagingTracker {
       startedAt: null,
       endedAt: null,
       texts: new Map<string, TextSnapshot[]>(),
+      diskChanges: new Map<string, number>(),
     };
 
     if (!this.assistantState) {
@@ -660,8 +689,11 @@ export class FineGrainedStagingTracker {
     this.assistantState.lastActivityAt = at;
     this.assistantState.events.push(event);
     this.applyToolCallPhase(event);
-    if (assistantPaths.length === 0 || event.capability === "command" || event.toolCall) {
+    if (claimsEverything) {
       this.assistantState.openEnded = true;
+    }
+    for (const filePath of claimedFromHuman) {
+      this.assistantState.files.add(filePath);
     }
     if (!this.isDeferredAssistantBoundary(event)) {
       this.assistantState.awaitingMaterialization = false;
@@ -745,6 +777,7 @@ export class FineGrainedStagingTracker {
       startedAt: null,
       endedAt: null,
       texts: new Map<string, TextSnapshot[]>(),
+      diskChanges: new Map<string, number>(),
     };
 
     return commits;
