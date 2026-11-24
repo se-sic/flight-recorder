@@ -32,11 +32,12 @@ function recorded(base = "e2e-base"): Array<{ subject: string; files: string[] }
 }
 
 /** Waits until the running recording has an assistant commit on its active branch. */
-async function waitForAssistantCommit(): Promise<void> {
+async function waitForAssistantCommit(timeoutMs?: number): Promise<void> {
   const active = (await getApi()).getRecordingBranchState()?.activeBranchName ?? "";
   await waitFor(
     () => recordedCommits(active).some((subject) => subject.startsWith("Flight Recorder: assistant")),
-    "an assistant commit on the active branch"
+    "an assistant commit on the active branch",
+    timeoutMs
   );
 }
 
@@ -118,7 +119,8 @@ suite("Edge cases", () => {
       }
       fs.writeFileSync(path.join(root, "index.js"), "module.exports = 2;\n");
     });
-    await waitForAssistantCommit();
+    // Thousands of watcher events can take a while on a busy machine.
+    await waitForAssistantCommit(30_000);
     await stopRecording();
     const elapsed = Date.now() - started;
 
@@ -148,7 +150,7 @@ suite("Edge cases", () => {
     assert.match(commits[1].subject, /^Flight Recorder: assistant tool edit/);
   });
 
-  test("unsaved human text and a Claude edit of the same file on disk (documents the behavior)", async () => {
+  test("unsaved human text is recorded from the editor, and Flight Recorder never saves it", async () => {
     const root = repoRoot();
     const file = path.join(root, "index.js");
     await startRecording();
@@ -163,9 +165,17 @@ suite("Edge cases", () => {
     await waitForAssistantCommit();
     await stopRecording();
 
-    const commits = recorded().filter((commit) => !commit.subject.startsWith("recording stopped"));
-    const contents = commits.map((commit, i) => `${commit.subject}: ${JSON.stringify(git(root, "show", `${FINAL}~${commits.length - i}:index.js`))}`);
-    console.log(`Unsaved-edit scenario:\n  ${contents.join("\n  ")}\n  editor: ${JSON.stringify(document.getText())} dirty=${document.isDirty}\n  disk: ${JSON.stringify(fs.readFileSync(file, "utf8"))}`);
+    const shas = git(root, "rev-list", "--reverse", `e2e-base..${FINAL}`).split("\n").filter(Boolean);
+    const recordedFiles = shas
+      .filter((sha) => git(root, "log", "-1", "--format=%s", sha).startsWith("Flight Recorder:"))
+      .map((sha) => [git(root, "log", "-1", "--format=%s", sha).split(" (")[0], git(root, "show", `${sha}:index.js`)]);
+    assert.deepEqual(recordedFiles, [
+      ["Flight Recorder: human edits", "// typed but not saved\nmodule.exports = 1;"],
+      ["Flight Recorder: assistant tool edit", "// claude\nmodule.exports = 1;"],
+    ]);
+    assert.ok(document.isDirty, "the human's text is still unsaved");
+    assert.match(document.getText(), /typed but not saved/);
+    assert.equal(fs.readFileSync(file, "utf8"), "// claude\nmodule.exports = 1;\n");
     await vscode.commands.executeCommand("workbench.action.revertAndCloseActiveEditor");
   });
 });

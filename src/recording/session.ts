@@ -269,39 +269,29 @@ async function settleWithin<T>(call: Thenable<T>, ms: number): Promise<T | undef
   }
 }
 
-/** Saves any open, dirty editor documents among the given paths, so a commit captures their current content. */
-async function saveTrackedFilesIfOpen(
-  pathsToSave: Iterable<string>
-): Promise<void> {
-  // Human commits carry editor snapshots, so skipping the save at shutdown loses nothing.
-  if (shuttingDown) {
-    return;
+/**
+ * Adds the text of open documents with unsaved changes to a commit, so the
+ * recording shows what is in the editor without saving the user's files.
+ * For an assistant commit this only covers files the window saw change in
+ * an editor (e.g. an accepted completion): an assistant that writes to disk
+ * leaves its content there, and unsaved text in the editor is the human's.
+ */
+function withUnsavedEditorTexts(commit: WindowCommit): WindowCommit {
+  if (commit.kind === "git-operation") {
+    return commit;
   }
-  const targetPaths = Array.from(
-    new Set(Array.from(pathsToSave).map((p) => normalizePath(p)))
-  );
-
-  for (const targetPath of targetPaths) {
-    const doc = vscode.workspace.textDocuments.find((d) => {
-      if (d.uri.scheme !== "file") {
-        return false;
-      }
-      return uriToPath(d.uri) === targetPath;
-    });
-
-    if (!doc || !doc.isDirty) {
+  const candidates = new Set(commit.kind === "assistant" ? commit.editedInEditor : commit.files);
+  const snapshots = { ...commit.snapshots };
+  for (const doc of vscode.workspace.textDocuments) {
+    if (doc.uri.scheme !== "file" || !doc.isDirty) {
       continue;
     }
-
-    const saved = await settleWithin(doc.save(), WINDOW_CALL_TIMEOUT_MS);
-    if (saved) {
-      getLogChannel().info(`Saved ${targetPath}`);
-    } else {
-      getLogChannel().info(
-        `Could not save ${targetPath}; committing current on-disk content.`
-      );
+    const docPath = uriToPath(doc.uri);
+    if (candidates.has(docPath) && snapshots[docPath] === undefined) {
+      snapshots[docPath] = doc.getText();
     }
   }
+  return Object.keys(snapshots).length > 0 ? { ...commit, snapshots } : commit;
 }
 
 /** Opens and attaches a log file tailer (positioned at end-of-file) to the recording session. */
@@ -331,8 +321,8 @@ function attachLogSource(
 }
 
 /**
- * Saves any dirty files in a window commit, commits it, and reports the
- * result. Stops recording and shows an error if git turns out to be
+ * Commits a window, with the unsaved editor text of its files, and reports
+ * the result. Stops recording and shows an error if git turns out to be
  * unavailable. Returns whether recording was stopped.
  */
 async function commitTrackedWindowAndReport(
@@ -340,9 +330,7 @@ async function commitTrackedWindowAndReport(
   commit: WindowCommit
 ): Promise<boolean> {
   const filteredFiles = filterInternalTrackingPaths(session, commit.files);
-  const filteredCommit = { ...commit, files: filteredFiles };
-
-  await saveTrackedFilesIfOpen(filteredCommit.files);
+  const filteredCommit = withUnsavedEditorTexts({ ...commit, files: filteredFiles });
 
   const result = await commitTrackedWindow(
     session.repoRoot,
@@ -565,12 +553,12 @@ function registerWorkspaceChangeTracking(
       if (!filePath || event.contentChanges.length === 0) {
         return;
       }
-      if (isEditorReloadOfGitWrite(session, filePath, event.document)) {
-        return;
-      }
 
       const filteredPaths = filterInternalTrackingPaths(session, [filePath]);
       if (filteredPaths.length === 0) {
+        return;
+      }
+      if (isEditorReloadOfGitWrite(session, filePath, event.document)) {
         return;
       }
 

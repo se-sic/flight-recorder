@@ -23,7 +23,7 @@ Supported assistants:
 3. Work with the assistant.
 4. Stop recording with `Stop Flight Recorder` in the status bar.
 
-The recording is stored on the branch `flight-recorder/<source-branch>`. Recording takes place in a separate, hidden Git worktree, so the current branch, index and working tree are not modified. The `Flight Recorder` view in the activity bar lists the commits of the last recording.
+The recording is stored on the branch `flight-recorder/<source-branch>`. Recording takes place in a separate, hidden Git worktree, so the current branch, index and working tree are not modified, and unsaved files stay unsaved (the recording takes their text from the editor). Switching to another branch saves the recording and starts a new one on the new branch. The `Flight Recorder` view in the activity bar lists the commits of the last recording.
 
 ### Claude Code
 
@@ -41,6 +41,7 @@ A recording branch contains:
 
 - `Flight Recorder: human edits` commits with changes made by the developer
 - `Flight Recorder: assistant ...` commits with changes made while the assistant was active
+- `Flight Recorder: git operation` commits with changes made by Git commands such as pull, merge, reset, rebase or stash, whoever ran them
 - a snapshot of the assistant log in `.log/`
 - the chat sessions active during the recording in `.chat-log/` (if `flightRecorder.exportChatsOnStop` is enabled)
 
