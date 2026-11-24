@@ -42,10 +42,22 @@ function subscriptionEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
+/** Quotes one argument for cmd.exe, so prompts with spaces stay one argument. */
+function quoteForCmd(arg: string): string {
+  return `"${arg.replace(/"/g, '\\"')}"`;
+}
+
 /** Runs a CLI in the workspace and resolves with its output; rejects on a non-zero exit or after `timeoutMs`. */
 function run(command: string, args: string[], timeoutMs: number): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd: repoRoot(), env: subscriptionEnv(), stdio: ["ignore", "pipe", "pipe"] });
+    // On Windows the CLIs are .cmd wrappers, which only start through a shell.
+    const windows = process.platform === "win32";
+    const child = spawn(command, windows ? args.map(quoteForCmd) : args, {
+      cwd: repoRoot(),
+      env: subscriptionEnv(),
+      stdio: ["ignore", "pipe", "pipe"],
+      shell: windows,
+    });
     let output = "";
     child.stdout.on("data", (chunk) => (output += chunk));
     child.stderr.on("data", (chunk) => (output += chunk));

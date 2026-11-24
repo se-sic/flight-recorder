@@ -282,7 +282,12 @@ export class VsCodeWindow {
   /** Closes VS Code normally and waits for it to exit. */
   async quit(): Promise<void> {
     const exited = new Promise((resolve) => this.process.once("exit", resolve));
-    await this.press("q", "KeyQ", 81, process.platform === "darwin" ? 4 : 2);
+    if (process.platform === "win32") {
+      // Windows has no quit shortcut; Alt+F4 would only close the window.
+      await this.runCommand("File: Exit");
+    } else {
+      await this.press("q", "KeyQ", 81, process.platform === "darwin" ? 4 : 2);
+    }
     await Promise.race([exited, sleep(30_000).then(() => this.process.kill("SIGKILL"))]);
     openWindows.delete(this);
     this.page?.close();
