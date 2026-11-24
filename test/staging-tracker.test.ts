@@ -697,3 +697,71 @@ test("without a turn end, an announced edit stops waiting after the safety limit
 
   assert.deepEqual(tracker.flushAll(7 * 60_000).map((commit) => [commit.kind, commit.files]), [["human", resolved("/tmp/never.ts")]]);
 });
+
+test("a git operation takes its files out of the human window and keeps earlier human text", () => {
+  const tracker = new FineGrainedStagingTracker(1_000);
+  const [edited, pulled, other] = resolved("/tmp/edited.ts", "/tmp/pulled.ts", "/tmp/other.ts");
+
+  // The human typed in `edited` and `other`, then stashed; git rewrote `edited` and `pulled`.
+  tracker.recordTextDocumentChange([textChange(edited, "typed by hand")], 1_000);
+  tracker.recordTextDocumentChange([textChange(other, "other text")], 2_000);
+  tracker.recordDiskChange([pulled], 5_100);
+  tracker.recordTextDocumentChange([textChange(edited, "reloaded from git")], 5_200);
+  const { before, operation } = tracker.recordGitOperation([edited, pulled], "stash", 5_000, 5_500);
+
+  assert.deepEqual(before.map((commit) => [commit.kind, commit.files]), [["human", [edited, other].sort()]]);
+  assert.deepEqual(before[0].kind === "human" && before[0].snapshots, { [edited]: "typed by hand" });
+  assert.deepEqual(operation, {
+    kind: "git-operation",
+    files: [edited, pulled].sort(),
+    startedAt: 5_000,
+    endedAt: 5_500,
+    operation: "stash",
+  });
+  assert.deepEqual(tracker.flushAll(6_000), [], "nothing is left over");
+});
+
+test("a git operation run by a shell command is not claimed by the assistant", () => {
+  const tracker = new FineGrainedStagingTracker(1_000);
+  const [pulled, edited] = resolved("/tmp/pulled.ts", "/tmp/edited.ts");
+  const [bash] = claudeHooks({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_use_id: "t1", tool_input: { command: "git pull" } });
+  const [edit] = claudeHooks({ hook_event_name: "PostToolUse", tool_name: "Edit", tool_use_id: "t0", tool_input: { file_path: edited, old_string: "a", new_string: "b" } });
+
+  tracker.recordAssistantEvent(edit, 1_000);
+  tracker.recordDiskChange([edited], 1_100);
+  tracker.recordAssistantEvent(bash, 2_000);
+  tracker.recordDiskChange([pulled], 2_300);
+  const { before, operation } = tracker.recordGitOperation([pulled, edited], "pull: Fast-forward", 2_200, 2_600);
+
+  assert.deepEqual(before, []);
+  assert.deepEqual(operation?.files, [pulled, edited].sort());
+  const [assistant] = tracker.flushAll(10_000);
+  assert.deepEqual(assistant.files, [edited], "the file the assistant edited by name stays its own");
+});
+
+test("a git operation commit message names the operation", () => {
+  const message = formatWindowCommitMessage(
+    { kind: "git-operation", files: resolved("/repo/a.ts"), startedAt: 0, endedAt: 1_000, operation: "pull: Fast-forward" },
+    path.resolve("/repo")
+  );
+  const [subject, body] = message.split("\n");
+  assert.equal(subject, "Flight Recorder: git operation (1 file)");
+  assert.deepEqual(JSON.parse(body), {
+    kind: "git-operation",
+    operation: "pull: Fast-forward",
+    files: ["a.ts"],
+    startedAt: "1970-01-01T00:00:00.000Z",
+    endedAt: "1970-01-01T00:00:01.000Z",
+  });
+});
+
+test("an assistant commit lists the files whose change it saw in an editor", () => {
+  const tracker = new FineGrainedStagingTracker(1_000);
+  const [completed, onDisk] = resolved("/tmp/completed.ts", "/tmp/on-disk.ts");
+  tracker.recordAssistantEvent(makeAssistantEvent({ fileOperations: [{ kind: "update", path: completed }, { kind: "update", path: onDisk }] }), 1_000);
+  tracker.recordTextDocumentChange([textChange(completed, "completion")], 1_100);
+  tracker.recordDiskChange([onDisk], 1_200);
+
+  const [commit] = tracker.flushAll(5_000);
+  assert.deepEqual(commit.kind === "assistant" && commit.editedInEditor, [completed]);
+});

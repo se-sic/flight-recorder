@@ -52,6 +52,7 @@ async function commitWindow(
       events: [],
       origins: ["assistant-tool-edit"],
       fileAttributions: [],
+      editedInEditor: [],
     };
   return commitTrackedWindow(repo, commit, false, false, false, target);
 }

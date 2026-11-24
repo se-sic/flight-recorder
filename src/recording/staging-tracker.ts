@@ -25,9 +25,23 @@ export type AssistantWindowCommit = {
   events: AssistantEvent[];
   origins: EditOrigin[];
   fileAttributions: FileAttribution[];
+  /** Files the window saw change in an editor; unsaved editor text there is the assistant's. */
+  editedInEditor: string[];
+  /** Content to commit instead of the working-tree file, by absolute path. */
+  snapshots?: Record<string, string>;
 };
 
-export type WindowCommit = HumanWindowCommit | AssistantWindowCommit;
+/** Files a git command (pull, merge, reset, stash, …) changed: neither human nor assistant work. */
+export type GitOperationCommit = {
+  kind: "git-operation";
+  files: string[];
+  startedAt: number;
+  endedAt: number;
+  /** What git did, from its reflog (e.g. "pull: Fast-forward"). */
+  operation: string;
+};
+
+export type WindowCommit = HumanWindowCommit | AssistantWindowCommit | GitOperationCommit;
 
 export type TextChangeRange = {
   startLine: number;
@@ -87,6 +101,8 @@ type HumanWindowState = {
   texts: Map<string, TextSnapshot[]>;
   /** When each file last changed on disk, for changes no editor text accounts for. */
   diskChanges: Map<string, number>;
+  /** When each file first changed in this window. */
+  firstChangedAt: Map<string, number>;
 };
 
 type AssistantWindowState = {
@@ -106,6 +122,19 @@ type AssistantWindowState = {
   /** Observed text changes, kept so evidence that arrives after its change can still be matched. */
   materializations: WorkspaceTextChange[];
 };
+
+/** Returns a human window with no changes. */
+function emptyHumanWindow(): HumanWindowState {
+  return {
+    kind: "human",
+    files: new Set<string>(),
+    startedAt: null,
+    endedAt: null,
+    texts: new Map<string, TextSnapshot[]>(),
+    diskChanges: new Map<string, number>(),
+    firstChangedAt: new Map<string, number>(),
+  };
+}
 
 /** Resolves paths to absolute form, dropping blanks and duplicates, and returns them sorted. */
 function normalizePaths(paths: Iterable<string>): string[] {
@@ -162,6 +191,7 @@ function finalizeAssistantWindow(
     fileAttributions: Array.from(state.fileAttributions.values()).sort(
       (left, right) => left.path.localeCompare(right.path)
     ),
+    editedInEditor: normalizePaths(state.materializations.map((change) => change.path)),
   };
 }
 
@@ -401,14 +431,7 @@ function materializationAttribution(
  * the assistant window.
  */
 export class FineGrainedStagingTracker {
-  private humanState: HumanWindowState = {
-    kind: "human",
-    files: new Set<string>(),
-    startedAt: null,
-    endedAt: null,
-    texts: new Map<string, TextSnapshot[]>(),
-    diskChanges: new Map<string, number>(),
-  };
+  private humanState: HumanWindowState = emptyHumanWindow();
 
   private assistantState: AssistantWindowState | null = null;
 
@@ -603,6 +626,9 @@ export class FineGrainedStagingTracker {
     this.humanState.endedAt = at;
     for (const filePath of normalized) {
       this.humanState.files.add(filePath);
+      if (!this.humanState.firstChangedAt.has(filePath)) {
+        this.humanState.firstChangedAt.set(filePath, at);
+      }
     }
   }
 
@@ -666,14 +692,7 @@ export class FineGrainedStagingTracker {
       }
       commits.push(humanCommit);
     }
-    this.humanState = {
-      kind: "human",
-      files: new Set<string>(),
-      startedAt: null,
-      endedAt: null,
-      texts: new Map<string, TextSnapshot[]>(),
-      diskChanges: new Map<string, number>(),
-    };
+    this.humanState = emptyHumanWindow();
 
     if (!this.assistantState) {
       const awaitingMaterialization = this.isDeferredAssistantBoundary(event);
@@ -729,6 +748,62 @@ export class FineGrainedStagingTracker {
     return commits;
   }
 
+  /**
+   * Takes the changes a git command made (see `GitOperationWatcher`) out of
+   * the open windows, so they count as neither human nor assistant work.
+   * Human changes to those files from before `startedAt` stay human, with
+   * the editor text from before the command where there is one; the human
+   * window is committed first so the command's commit comes after it.
+   * Changes an assistant made with a tool that named the file stay the
+   * assistant's.
+   */
+  recordGitOperation(
+    paths: Iterable<string>,
+    operation: string,
+    startedAt: number,
+    at = Date.now()
+  ): { before: WindowCommit[]; operation: GitOperationCommit | null } {
+    const files = normalizePaths(paths);
+    if (files.length === 0) {
+      return { before: [], operation: null };
+    }
+
+    const snapshots: Record<string, string> = {};
+    for (const filePath of files) {
+      const firstChangedAt = this.humanState.firstChangedAt.get(filePath);
+      if (firstChangedAt === undefined || firstChangedAt >= startedAt) {
+        this.humanState.files.delete(filePath);
+        continue;
+      }
+      const earlier = (this.humanState.texts.get(filePath) ?? []).filter((t) => t.at < startedAt);
+      if (earlier.length > 0) {
+        snapshots[filePath] = earlier[earlier.length - 1].text;
+      }
+    }
+    const before: WindowCommit[] = [];
+    const humanCommit = finalizeHumanWindow(this.humanState);
+    if (humanCommit) {
+      if (Object.keys(snapshots).length > 0) {
+        humanCommit.snapshots = snapshots;
+      }
+      before.push(humanCommit);
+    }
+    this.humanState = emptyHumanWindow();
+
+    if (this.assistantState) {
+      for (const filePath of files) {
+        if (!this.assistantState.fileAttributions.has(filePath)) {
+          this.assistantState.files.delete(filePath);
+        }
+      }
+    }
+
+    return {
+      before,
+      operation: { kind: "git-operation", files, startedAt, endedAt: at, operation },
+    };
+  }
+
   /** Closes and returns the assistant window if its debounce timeout has elapsed. */
   flushAssistantWindowIfIdle(at = Date.now()): WindowCommit | null {
     if (!this.assistantState) {
@@ -782,14 +857,7 @@ export class FineGrainedStagingTracker {
     if (humanCommit) {
       commits.push(humanCommit);
     }
-    this.humanState = {
-      kind: "human",
-      files: new Set<string>(),
-      startedAt: null,
-      endedAt: null,
-      texts: new Map<string, TextSnapshot[]>(),
-      diskChanges: new Map<string, number>(),
-    };
+    this.humanState = emptyHumanWindow();
 
     return commits;
   }
@@ -834,12 +902,25 @@ function assistantOriginLabel(origins: EditOrigin[]): string {
   }
 }
 
-/** Builds the git commit message for a human or assistant window commit. */
+/** Builds the git commit message for a human, assistant or git operation commit. */
 export function formatWindowCommitMessage(
   commit: WindowCommit,
   repoRoot?: string
 ): string {
   const files = formatCommitPaths(commit.files, repoRoot);
+
+  if (commit.kind === "git-operation") {
+    return [
+      `${EXTENSION_NAME}: git operation (${fileCountLabel(files.length)})`,
+      JSON.stringify({
+        kind: commit.kind,
+        operation: commit.operation,
+        files,
+        startedAt: formatIsoTimestamp(commit.startedAt),
+        endedAt: formatIsoTimestamp(commit.endedAt),
+      }),
+    ].join("\n");
+  }
 
   if (commit.kind === "human") {
     return [

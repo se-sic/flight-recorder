@@ -25,6 +25,8 @@ function kindLabel(entry: RecordingHistoryEntry): string {
       return entry.origins.length > 0
         ? `Assistant · ${entry.origins.map(originLabel).join(", ")}`
         : "Assistant edit";
+    case "git":
+      return "Git operation";
     case "log":
       return "Assistant log";
     case "chat":
@@ -191,6 +193,7 @@ ${SHARED_WEBVIEW_CSS}
       }
       .entry.human { border-left-color: var(--vscode-charts-blue); }
       .entry.assistant { border-left-color: var(--vscode-charts-purple); }
+      .entry.git { border-left-color: var(--vscode-charts-orange); }
       #visualize {
         justify-self: start;
         margin-top: 4px;

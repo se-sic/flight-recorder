@@ -1323,7 +1323,7 @@ export async function commitTrackedWindow(
     )
   );
 
-  const snapshots = commit.kind === "human" ? commit.snapshots : undefined;
+  const snapshots = commit.kind === "git-operation" ? undefined : commit.snapshots;
   const hasSnapshot = (rel: string) => snapshots?.[normalizePath(root, rel)] !== undefined;
   // Ignored files (e.g. `.env`) are never recorded; staging them would also
   // fail the whole commit. Transient files (created and removed again within
@@ -1412,16 +1412,16 @@ async function commitWithSnapshots(
         { env }
       );
       if (blob.code !== 0 || update.code !== 0) {
-        return fail(blob.code !== 0 ? blob : update, "add", `Failed to stage human edits of ${rel}.`);
+        return fail(blob.code !== 0 ? blob : update, "add", `Failed to stage the editor text of ${rel}.`);
       }
     }
 
     const commitRes = await gitCmd(["commit", "-m", msg], repoRoot, { env });
     if (commitRes.code !== 0) {
       if (`${commitRes.out}${commitRes.err}`.includes("nothing to commit")) {
-        return { ok: false, skipped: true, msg: "No staged human changes." };
+        return { ok: false, skipped: true, msg: "No staged changes." };
       }
-      return fail(commitRes, "commit", "Failed to commit human edits.");
+      return fail(commitRes, "commit", "Failed to commit the recorded changes.");
     }
 
     await gitCmd(["reset", "-q", "--", ...relFiles], repoRoot);

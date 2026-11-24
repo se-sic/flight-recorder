@@ -13,6 +13,7 @@ export type BranchState = {
   repoRoot: string;
   isRecording: boolean;
   commitMode: "trackingWorktree" | "currentBranch";
+  sourceBranchName?: string;
   activeBranchName?: string;
   finalBranchName?: string;
   displayBranchName?: string;

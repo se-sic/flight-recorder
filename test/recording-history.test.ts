@@ -37,6 +37,7 @@ test("readRecordingHistory parses every recording commit kind, newest first", as
         events: [],
         origins: ["assistant-tool-edit"],
         fileAttributions: [],
+        editedInEditor: [],
       },
       repo
     )

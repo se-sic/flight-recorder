@@ -6,7 +6,7 @@ export type RecordingHistoryEntry = {
   authorDate: string;
   author: string;
   subject: string;
-  kind: "human" | "assistant" | "log" | "chat" | "unknown";
+  kind: "human" | "assistant" | "git" | "log" | "chat" | "unknown";
   files: string[];
   origins: string[];
   /** Whether the commit is on the saved recording branch; false while it only exists on the running recording's branch. */
@@ -62,6 +62,9 @@ function classifySubject(subject: string): RecordingHistoryEntry["kind"] {
   }
   if (subject.startsWith("Flight Recorder: assistant")) {
     return "assistant";
+  }
+  if (subject.startsWith("Flight Recorder: git operation")) {
+    return "git";
   }
   if (subject.startsWith("recording stopped:")) {
     return "log";
