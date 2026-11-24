@@ -270,4 +270,30 @@ function keepLogs(name: string, rels: string[]): void {
     assert.doesNotMatch(fs.readFileSync(path.join(repoRoot(), "index.js"), "utf8"), /\/\/ denied/);
     assert.deepEqual(commitsFor(commits, "index.js").map((commit) => commit.subject), ["Flight Recorder: human edits (1 file)"], summary);
   });
+
+  test("Claude Code: files a subagent changes are assistant commits", async function () {
+    this.timeout(600_000);
+    await configureClaudeHooks();
+    dialogs = stubDialogs({});
+    await startRecording();
+    await humanEdit("readme.md", "\nhuman before the subagent\n");
+
+    await claude(
+      "Use the Task tool to start a general-purpose subagent with this task: create the file subagent.txt containing the single line `from the subagent`. Do not create the file yourself.",
+      "Task,Read,Write,Edit"
+    );
+    await sleep(3_000);
+    await stopRecording();
+    keepLogs("claude-subagent", [HOOK_LOG]);
+
+    const hooks = fs.readFileSync(path.join(repoRoot(), HOOK_LOG), "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    console.log(`Subagent run hooks: ${hooks.map((hook) => `${hook.hook_event_name}${hook.tool_name ? ` ${hook.tool_name}` : ""}${hook.agent_id ? " (subagent)" : ""}`).join(", ")}`);
+    const commits = recordedCommitsWithFiles();
+    const summary = commits.map((commit) => `${commit.subject}: ${commit.files.join(", ")}`).join("\n");
+    assert.ok(fs.existsSync(path.join(repoRoot(), "subagent.txt")), `the subagent created the file\n${summary}`);
+    assert.deepEqual(commitsFor(commits, "readme.md").map((c) => c.subject), ["Flight Recorder: human edits (1 file)"], summary);
+    const created = commitsFor(commits, "subagent.txt");
+    assert.equal(created.length, 1, summary);
+    assert.match(created[0].subject, /Flight Recorder: assistant/, summary);
+  });
 });
