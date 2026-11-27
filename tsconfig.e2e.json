@@ -1,0 +1,19 @@
+{
+	"compilerOptions": {
+		"module": "Node16",
+		"target": "ES2022",
+		"outDir": "out/test",
+		"rootDir": "test",
+		"lib": [
+			"ES2022"
+		],
+		"types": [
+			"node",
+			"vscode",
+			"mocha"
+		],
+		"sourceMap": true,
+		"strict": true
+	},
+	"include": ["test/e2e/**/*", "test/git-fixtures.ts"]
+}

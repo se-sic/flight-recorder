@@ -5,6 +5,7 @@ import type * as vscode from "vscode";
 import { AssistantEvent, FileOperation } from "../../event";
 import { AssistantRuntimeEventSource } from "../../integration";
 import { Tailer } from "../../../utils/tailer";
+import { normalizePath, samePath } from "../../../utils/fs-path";
 
 /** Files copied from each Copilot CLI session-state directory. */
 export const COPILOT_CLI_SESSION_FILES = ["events.jsonl", "workspace.yaml"];
@@ -30,12 +31,6 @@ export function getCopilotCliSessionStateDir(): string {
   const copilotHome =
     process.env.COPILOT_HOME || path.join(os.homedir(), ".copilot");
   return path.join(copilotHome, "session-state");
-}
-
-/** Normalizes a filesystem path for comparison (resolved, no trailing separator, case-insensitive on Windows). */
-function normalizeForCompare(p: string): string {
-  const resolved = path.resolve(p).replace(/[\\/]+$/, "");
-  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
 /** Parses the top-level keys Flight Recorder needs from a Copilot CLI `workspace.yaml`. */
@@ -69,8 +64,7 @@ async function readCopilotCliSession(dir: string): Promise<CopilotCliSession | n
 }
 
 function isSessionForRepo(session: CopilotCliSession, repoRoot: string): boolean {
-  const target = normalizeForCompare(repoRoot);
-  return session.workspace.dirs.some((d) => normalizeForCompare(d) === target);
+  return session.workspace.dirs.some((d) => samePath(d, repoRoot));
 }
 
 /** Lists the names of the session directories in the session-state directory. */
@@ -103,11 +97,28 @@ export async function findCopilotCliSessionsForRepo(
 }
 
 /**
- * Resolves a CLI-reported path and lowercases its Windows drive letter, the
- * way VS Code's `Uri.fsPath` does, so it matches workspace change paths.
+ * Keeps the sessions with activity at or after `since`, judged by the newest
+ * modification time of their session files (e.g. to export only sessions
+ * that were used during a recording).
  */
-function toVscodePath(p: string): string {
-  return path.resolve(p).replace(/^[A-Z]:/, (drive) => drive.toLowerCase());
+export async function copilotCliSessionsActiveSince(
+  sessions: CopilotCliSession[],
+  since: Date
+): Promise<CopilotCliSession[]> {
+  const active = await Promise.all(
+    sessions.map(async (session) => {
+      const mtimes = await Promise.all(
+        COPILOT_CLI_SESSION_FILES.map((file) =>
+          fs.promises.stat(path.join(session.dir, file)).then(
+            (stat) => stat.mtimeMs,
+            () => 0
+          )
+        )
+      );
+      return Math.max(...mtimes) >= since.getTime();
+    })
+  );
+  return sessions.filter((_, index) => active[index]);
 }
 
 /** Extracts file operations from a Copilot CLI edit tool's arguments. */
@@ -121,7 +132,7 @@ function collectCliToolFileOperations(
       args.matchAll(/^\*\*\* (Update|Add|Delete) File:\s+(.+)$/gm),
       (m) => ({
         kind: kinds[m[1] as keyof typeof kinds],
-        path: toVscodePath(m[2].trim()),
+        path: normalizePath(m[2].trim()),
       })
     );
   }
@@ -129,7 +140,7 @@ function collectCliToolFileOperations(
   const filePath = (args as { path?: unknown } | null)?.path;
   if (typeof filePath === "string" && filePath.trim()) {
     return [
-      { kind: toolName === "create" ? "create" : "update", path: toVscodePath(filePath) },
+      { kind: toolName === "create" ? "create" : "update", path: normalizePath(filePath) },
     ];
   }
   return [];

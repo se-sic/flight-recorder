@@ -44,15 +44,67 @@
         "title": "Flight Recorder: Configure Claude Hooks"
       },
       {
+        "command": "flightRecorder.configureOpenCodePlugin",
+        "title": "Flight Recorder: Configure OpenCode Plugin"
+      },
+      {
         "command": "flightRecorder.anonymizeRepo",
         "title": "Flight Recorder: Anonymize Repository"
       },
       {
         "command": "flightRecorder.editHistoryVisualization",
         "title": "Flight Recorder: Open Edit History Visualization"
+      },
+      {
+        "command": "flightRecorder.refreshHistory",
+        "title": "Flight Recorder: Refresh Recording History",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "flightRecorder.pushTrackingBranch",
+        "title": "Flight Recorder: Push Recording Branch"
+      },
+      {
+        "command": "flightRecorder.copyTrackingBranch",
+        "title": "Flight Recorder: Copy Recording Branch Name",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "flightRecorder.recoverRecordings",
+        "title": "Flight Recorder: Recover Unfinished Recordings"
       }
     ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "flightRecorder",
+          "title": "Flight Recorder",
+          "icon": "assets/icon.png"
+        }
+      ]
+    },
+    "views": {
+      "flightRecorder": [
+        {
+          "id": "flightRecorder.historyView",
+          "name": "Recording History",
+          "type": "webview"
+        }
+      ]
+    },
     "menus": {
+      "view/title": [
+        {
+          "command": "flightRecorder.copyTrackingBranch",
+          "when": "view == flightRecorder.historyView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "flightRecorder.refreshHistory",
+          "when": "view == flightRecorder.historyView",
+          "group": "navigation@2"
+        }
+      ],
       "editor/title": [
         {
           "command": "flightRecorder.start",
@@ -79,11 +131,13 @@
           "enum": [
             "github-copilot",
             "claude-code",
+            "opencode",
             "askOnStartup"
           ],
           "enumDescriptions": [
             "Always record GitHub Copilot.",
             "Always record Claude Code.",
+            "Always record OpenCode (2.0 or newer).",
             "Prompt for which assistant to monitor each time recording starts."
           ],
           "default": "github-copilot",
@@ -118,6 +172,15 @@
           "default": "wait",
           "description": "Controls what happens when the Claude Code integration cannot find a repo-specific transcript or hook log yet. 'wait' starts recording and attaches once the source appears; 'fail' aborts startup immediately."
         },
+        "flightRecorder.openCodeMissingSourceBehavior": {
+          "type": "string",
+          "enum": [
+            "wait",
+            "fail"
+          ],
+          "default": "wait",
+          "description": "Controls what happens when the OpenCode plugin is installed but OpenCode has not created its log yet. 'wait' starts recording and attaches once the log appears; 'fail' aborts startup immediately."
+        },
         "flightRecorder.addAll": {
           "type": "boolean",
           "default": false
@@ -130,6 +193,24 @@
           "type": "boolean",
           "default": false,
           "description": "Do not run git commit; only print what would be committed."
+        },
+        "flightRecorder.commitMode": {
+          "type": "string",
+          "enum": [
+            "trackingWorktree",
+            "currentBranch"
+          ],
+          "enumDescriptions": [
+            "Commit Flight Recorder snapshots in a hidden worktree on a dedicated tracking branch.",
+            "Commit Flight Recorder snapshots directly in the currently opened repository checkout."
+          ],
+          "default": "trackingWorktree",
+          "description": "Controls where Flight Recorder creates its tracking commits. The default hidden worktree mode keeps the user's current branch and staging area untouched."
+        },
+        "flightRecorder.trackingBranchPrefix": {
+          "type": "string",
+          "default": "flight-recorder",
+          "description": "Branch prefix used when flightRecorder.commitMode is trackingWorktree. The source branch name is appended after this prefix."
         },
         "flightRecorder.forceAddGeneratedLogs": {
           "type": "boolean",
@@ -163,17 +244,20 @@
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "pretest": "npm run compile && npm run lint",
+    "pretest": "npm run compile && npm run lint && tsc -p tsconfig.e2e.json",
     "lint": "eslint src",
     "test": "vscode-test",
+    "test:e2e": "npm test",
+    "test:live": "npm run pretest && node test/run-live.mjs",
+    "test:ui": "npm run compile && tsc -p tsconfig.test.json && node --test --test-concurrency=1 out/test-unit/test/ui/*.ui.js",
     "test:unit": "tsc -p tsconfig.test.json && node --test out/test-unit/test/**/*.test.js"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
     "@types/node": "22.x",
     "@types/vscode": "^1.108.0",
-    "@vscode/test-cli": "^0.0.11",
-    "@vscode/test-electron": "^2.5.2",
+    "@vscode/test-cli": "^0.0.15",
+    "@vscode/test-electron": "^3.1.0",
     "eslint": "^9.39.2",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.54.0"

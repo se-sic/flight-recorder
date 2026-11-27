@@ -9,3 +9,8 @@ vsc-extension-quickstart.md
 **/*.map
 **/*.ts
 **/.vscode-test.*
+test/**
+out/test/**
+out/test-unit/**
+out/live-logs/**
+**/tsconfig.*.json

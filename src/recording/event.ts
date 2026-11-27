@@ -1,4 +1,4 @@
-import * as path from "path";
+import { normalizePath } from "../utils/fs-path";
 
 export type AssistantCapability =
   | "inline-completion"
@@ -6,6 +6,8 @@ export type AssistantCapability =
   | "tool-call"
   | "chat"
   | "command"
+  /** Reads, searches and other activity that never changes files. */
+  | "read-only"
   | "unknown";
 
 export type AssistantEventKind =
@@ -63,18 +65,20 @@ export type AssistantEvent = {
   cursorPosition?: CursorPosition;
   origin?: EditOrigin;
   evidence?: AttributionEvidence[];
+  /**
+   * Marks the start or end of a tool run that may change any file (e.g. a
+   * shell command). While one is running, the assistant window stays open
+   * and claims every workspace change. A `finished` event without `id`
+   * means all running tools are done (e.g. the assistant's turn ended).
+   */
+  toolCall?: { id?: string; phase: "started" | "finished" };
   metadata?: Record<string, unknown>;
 };
-
-/** Resolves a path to a normalized absolute form. */
-function normalizeFilePath(candidate: string): string {
-  return path.resolve(candidate);
-}
 
 /** Collects the sorted, deduplicated, absolute file paths touched by an assistant event's file operations. */
 export function collectEventFilePaths(ev: AssistantEvent): string[] {
   const filePaths = new Set(
-    ev.fileOperations.map((operation) => normalizeFilePath(operation.path))
+    ev.fileOperations.map((operation) => normalizePath(operation.path))
   );
 
   return Array.from(filePaths).sort((left, right) => left.localeCompare(right));

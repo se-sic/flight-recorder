@@ -3,11 +3,13 @@ import * as path from "path";
 import * as vscode from "vscode";
 import {
   COPILOT_CLI_SESSION_FILES,
+  copilotCliSessionsActiveSince,
   findCopilotCliSessionsForRepo,
   getCopilotCliSessionStateDir,
 } from "./agents/copilot/cli-sessions";
-import { CHAT_EXPORT_PATH } from "../utils/paths";
+import { CHAT_EXPORT_PATH } from "../utils/constants";
 import { getLogChannel } from "../utils/logging";
+import { uriToPath } from "../utils/fs-path";
 
 export type ChatExportResult =
   | { ok: true; count: number; destDir: string }
@@ -89,7 +91,9 @@ function uniqueSessionName(
  */
 export async function exportCurrentWorkspaceChats(
   context: vscode.ExtensionContext,
-  repoRoot: string
+  repoRoot: string,
+  outputRoot = repoRoot,
+  activeSince?: Date
 ): Promise<ChatExportResult> {
   const currentWsStorageUri = context.storageUri; // per-workspace storage
   if (!currentWsStorageUri) {
@@ -99,18 +103,36 @@ export async function exportCurrentWorkspaceChats(
     };
   }
 
-  const extensionStorageDir = currentWsStorageUri.fsPath;
+  const extensionStorageDir = uriToPath(currentWsStorageUri);
   const workspaceDir = path.dirname(extensionStorageDir);
   getLogChannel().info(`Current workspace storage: ${workspaceDir}`);
   const chatSessionsDir = path.join(workspaceDir, "chatSessions");
 
-  const sessionFiles = (await safeReadDirFilesOnly(chatSessionsDir)).filter((f) =>
+  let sessionFiles = (await safeReadDirFilesOnly(chatSessionsDir)).filter((f) =>
     f.toLowerCase().endsWith(".json") || f.toLowerCase().endsWith(".jsonl")
   );
 
   // Copilot CLI agent sessions live outside VS Code's workspace storage.
   const cliStateDir = getCopilotCliSessionStateDir();
-  const cliSessions = await findCopilotCliSessionsForRepo(repoRoot, cliStateDir);
+  let cliSessions = await findCopilotCliSessionsForRepo(repoRoot, cliStateDir);
+
+  // A recording only exports sessions used while it ran, never older ones.
+  if (activeSince) {
+    const since = activeSince.getTime();
+    const modified = await Promise.all(
+      sessionFiles.map((f) =>
+        fs.promises.stat(path.join(chatSessionsDir, f)).then(
+          (stat) => stat.mtimeMs >= since,
+          () => false
+        )
+      )
+    );
+    sessionFiles = sessionFiles.filter((_, index) => modified[index]);
+    cliSessions = await copilotCliSessionsActiveSince(cliSessions, activeSince);
+    if (sessionFiles.length === 0 && cliSessions.length === 0) {
+      return { ok: true, count: 0, destDir: path.join(outputRoot, CHAT_EXPORT_PATH) };
+    }
+  }
 
   if (sessionFiles.length === 0 && cliSessions.length === 0) {
     return {
@@ -122,7 +144,7 @@ export async function exportCurrentWorkspaceChats(
     };
   }
 
-  const destDir = path.join(repoRoot, CHAT_EXPORT_PATH);
+  const destDir = path.join(outputRoot, CHAT_EXPORT_PATH);
   const usedNames = new Set<string>();
 
   if (sessionFiles.length > 0) {

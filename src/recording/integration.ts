@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import { AssistantEvent } from "./event";
 import { claudeCodeIntegration } from "./agents/claude/claude-integration";
 import { copilotIntegration } from "./agents/copilot/copilot-integration";
+import { openCodeIntegration } from "./agents/opencode/opencode-integration";
 
 export type AssistantEventParser = {
   feed(chunk: string): Generator<AssistantEvent>;
@@ -66,6 +67,7 @@ export interface AssistantIntegration {
 export const AVAILABLE_ASSISTANT_INTEGRATIONS: AssistantIntegration[] = [
   copilotIntegration,
   claudeCodeIntegration,
+  openCodeIntegration,
 ];
 
 const integrationById = new Map<string, AssistantIntegration>(

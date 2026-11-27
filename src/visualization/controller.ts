@@ -38,6 +38,7 @@ import {
 import { EXTENSION_NAME } from "../utils/constants";
 import { gitCmd } from "../utils/git";
 import { getLogChannel } from "../utils/logging";
+import { uriToPath } from "../utils/fs-path";
 
 type ActiveVisualization = {
   editorUri: string;
@@ -62,6 +63,8 @@ type VisualizationController = {
   sequentialPaletteValue: string;
   qualitativePaletteValue: string;
   lastRunTimestamp: number;
+  /** Revision whose history is shown: HEAD, or a recording branch opened from the history panel. */
+  revision: string;
 };
 
 const visualizationController: VisualizationController = {
@@ -75,6 +78,7 @@ const visualizationController: VisualizationController = {
   sequentialPaletteValue: DEFAULT_SEQUENTIAL_PALETTE_VALUE,
   qualitativePaletteValue: DEFAULT_QUALITATIVE_PALETTE_VALUE,
   lastRunTimestamp: 0,
+  revision: "HEAD",
 };
 
 /** Finds the editor the active visualization is attached to, falling back to the currently active file editor. */
@@ -202,7 +206,7 @@ function updateLegendPanel(
 
   setLegendHtml(
     panel,
-    buildLegendHtml(filePath, commits, paletteByCommit, kindByCommit, mode, selectedPaletteValue, selectedCommitHash)
+    buildLegendHtml(filePath, commits, paletteByCommit, kindByCommit, mode, selectedPaletteValue, selectedCommitHash, visualizationController.revision)
   );
 }
 
@@ -381,7 +385,7 @@ async function applyVisualizationToEditor(
     return;
   }
 
-  const filePath = editor.document.uri.fsPath;
+  const filePath = uriToPath(editor.document.uri);
   const repoRootResult = await resolveRepoRootForFile(filePath);
   if (isStale()) { return; }
   if (!repoRootResult.ok) {
@@ -397,7 +401,8 @@ async function applyVisualizationToEditor(
   const ownership = await buildFileOwnershipRanges(
     repoRoot,
     relativeFilePath,
-    editor.document.getText()
+    editor.document.getText(),
+    visualizationController.revision
   );
   if (isStale()) { return; }
   if (!ownership.ok) {
@@ -520,19 +525,25 @@ function registerVisualizationListeners(context: vscode.ExtensionContext): void 
 /**
  * Entry point for the "Open Edit History Visualization" command: enables
  * the feature, registers listeners, and renders the visualization for the
- * currently active editor.
+ * currently active editor. `revision` selects whose history is shown, e.g. a
+ * recording branch; it defaults to HEAD.
  */
 export async function startEditHistoryVisualization(
-  context: vscode.ExtensionContext
+  context: vscode.ExtensionContext,
+  revision = "HEAD"
 ): Promise<void> {
   visualizationController.extensionContext = context;
   visualizationController.shownFailureKinds.clear();
+  const revisionChanged = visualizationController.revision !== revision;
+  visualizationController.revision = revision;
 
   if (visualizationController.enabled) {
-    await applyVisualizationToEditor(vscode.window.activeTextEditor);
-    vscode.window.showInformationMessage(
-      "Edit history visualization is already active."
-    );
+    await applyVisualizationToEditor(findVisualizationEditor());
+    if (!revisionChanged) {
+      vscode.window.showInformationMessage(
+        "Edit history visualization is already active."
+      );
+    }
     return;
   }
 

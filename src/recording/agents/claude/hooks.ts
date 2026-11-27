@@ -1,7 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
-import { gitCmd } from "../../../utils/git";
+import { ensureLineInFile, getGitTopLevel } from "../../../utils/git-exclude";
 import { getWorkspaceRepoRoot } from "../../../utils/paths";
 import { EXTENSION_NAME } from "../../../utils/constants";
 import {
@@ -89,33 +89,6 @@ function readClaudeSettings(settingsPath: string): ClaudeSettings {
   }
 
   return parsed as ClaudeSettings;
-}
-
-/** Resolves the git repository's top-level directory, throwing if the folder is not a git repository. */
-async function getGitTopLevel(repoRoot: string): Promise<string> {
-  const res = await gitCmd(["rev-parse", "--show-toplevel"], repoRoot);
-  if (res.code !== 0 || res.out.trim().length === 0) {
-    throw new Error("The opened folder is not a git repository.");
-  }
-
-  return path.resolve(res.out.trim());
-}
-
-/** Appends a line to a file if it is not already present (trimmed comparison), creating the file/directory if needed. */
-function ensureLineInFile(filePath: string, line: string): void {
-  const normalizedLine = line.trim();
-  let existing = "";
-  if (fs.existsSync(filePath)) {
-    existing = fs.readFileSync(filePath, "utf8");
-    const existingLines = existing.split(/\r?\n/).map((entry) => entry.trim());
-    if (existingLines.includes(normalizedLine)) {
-      return;
-    }
-  }
-
-  const prefix = existing.length > 0 && !existing.endsWith("\n") ? "\n" : "";
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, existing + prefix + normalizedLine + "\n", "utf8");
 }
 
 /**
@@ -254,6 +227,10 @@ export async function configureClaudeHooks(): Promise<void> {
 
     await ensureGitExcludeEntries(repoRoot, scope, hookLogPath);
 
+    // Switching the integration writes workspace settings. If that creates
+    // `.vscode/settings.json`, keep it out of the participant's git status.
+    const workspaceSettingsPath = path.join(repoRoot, ".vscode", "settings.json");
+    const hadWorkspaceSettings = fs.existsSync(workspaceSettingsPath);
     const cfg = vscode.workspace.getConfiguration("flightRecorder");
     await cfg.update(
       "activeIntegration",
@@ -270,6 +247,13 @@ export async function configureClaudeHooks(): Promise<void> {
       "wait",
       vscode.ConfigurationTarget.Workspace
     );
+    if (!hadWorkspaceSettings && fs.existsSync(workspaceSettingsPath)) {
+      const gitTopLevel = await getGitTopLevel(repoRoot);
+      ensureLineInFile(
+        path.join(gitTopLevel, ".git", "info", "exclude"),
+        path.relative(gitTopLevel, workspaceSettingsPath).split(path.sep).join("/")
+      );
+    }
 
     await showPostConfigurationGuidance();
   } catch (error) {

@@ -1,4 +1,3 @@
-import * as path from "path";
 import * as crypto from "crypto";
 import {
   AssistantEvent,
@@ -6,6 +5,7 @@ import {
   collectEventFilePaths,
   EditOrigin,
 } from "./event";
+import { normalizePath, relativePathInside } from "../utils/fs-path";
 import { EXTENSION_NAME } from "../utils/constants";
 
 export type HumanWindowCommit = {
@@ -25,9 +25,23 @@ export type AssistantWindowCommit = {
   events: AssistantEvent[];
   origins: EditOrigin[];
   fileAttributions: FileAttribution[];
+  /** Files the window saw change in an editor; unsaved editor text there is the assistant's. */
+  editedInEditor: string[];
+  /** Content to commit instead of the working-tree file, by absolute path. */
+  snapshots?: Record<string, string>;
 };
 
-export type WindowCommit = HumanWindowCommit | AssistantWindowCommit;
+/** Files a git command (pull, merge, reset, stash, …) changed: neither human nor assistant work. */
+export type GitOperationCommit = {
+  kind: "git-operation";
+  files: string[];
+  startedAt: number;
+  endedAt: number;
+  /** What git did, from its reflog (e.g. "pull: Fast-forward"). */
+  operation: string;
+};
+
+export type WindowCommit = HumanWindowCommit | AssistantWindowCommit | GitOperationCommit;
 
 export type TextChangeRange = {
   startLine: number;
@@ -52,6 +66,18 @@ type TextSnapshot = { at: number; text: string };
  * parsed. Human text older than this is safe to attribute to the human.
  */
 const ASSISTANT_EVENT_LAG_MS = 1_000;
+/**
+ * How far back a tool run that names no files (a shell command) claims
+ * on-disk changes the file watcher reported before the run's log line was read.
+ */
+const RECENT_DISK_CHANGE_MS = 2_000;
+
+/**
+ * How long an assistant window waits for a running tool's completion signal
+ * without any other activity, in case the signal never arrives (e.g. the
+ * user interrupted the assistant).
+ */
+const MAX_TOOL_RUN_IDLE_MS = 5 * 60_000;
 
 export type FileAttribution = {
   path: string;
@@ -73,6 +99,10 @@ type HumanWindowState = {
   endedAt: number | null;
   /** Recent document texts per file, oldest first. */
   texts: Map<string, TextSnapshot[]>;
+  /** When each file last changed on disk, for changes no editor text accounts for. */
+  diskChanges: Map<string, number>;
+  /** When each file first changed in this window. */
+  firstChangedAt: Map<string, number>;
 };
 
 type AssistantWindowState = {
@@ -83,7 +113,28 @@ type AssistantWindowState = {
   events: AssistantEvent[];
   fileAttributions: Map<string, FileAttribution>;
   awaitingMaterialization: boolean;
+  /** Set when the assistant's turn ended; an edit still awaited then will not come. */
+  turnEnded: boolean;
+  /** Claims every workspace change, because an event named no files or ran a tool that can change anything. */
+  openEnded: boolean;
+  /** Tools reported as started but not yet finished (see `AssistantEvent.toolCall`). */
+  runningTools: Set<string>;
+  /** Observed text changes, kept so evidence that arrives after its change can still be matched. */
+  materializations: WorkspaceTextChange[];
 };
+
+/** Returns a human window with no changes. */
+function emptyHumanWindow(): HumanWindowState {
+  return {
+    kind: "human",
+    files: new Set<string>(),
+    startedAt: null,
+    endedAt: null,
+    texts: new Map<string, TextSnapshot[]>(),
+    diskChanges: new Map<string, number>(),
+    firstChangedAt: new Map<string, number>(),
+  };
+}
 
 /** Resolves paths to absolute form, dropping blanks and duplicates, and returns them sorted. */
 function normalizePaths(paths: Iterable<string>): string[] {
@@ -91,7 +142,7 @@ function normalizePaths(paths: Iterable<string>): string[] {
     new Set(
       Array.from(paths)
         .filter((candidate) => candidate.trim().length > 0)
-        .map((candidate) => path.resolve(candidate))
+        .map((candidate) => normalizePath(candidate))
     )
   ).sort((left, right) => left.localeCompare(right));
 }
@@ -140,6 +191,7 @@ function finalizeAssistantWindow(
     fileAttributions: Array.from(state.fileAttributions.values()).sort(
       (left, right) => left.path.localeCompare(right.path)
     ),
+    editedInEditor: normalizePaths(state.materializations.map((change) => change.path)),
   };
 }
 
@@ -283,7 +335,7 @@ function attributionFromEvent(
   const proposedTextHashes = collectEvidenceTextHashes(evidence);
 
   return {
-    path: path.resolve(filePath),
+    path: normalizePath(filePath),
     origin: event.origin ?? "assistant-unknown",
     confidence:
       proposedTextHashes.length > 0 || evidence.length > 0 ? "medium" : "low",
@@ -379,13 +431,7 @@ function materializationAttribution(
  * the assistant window.
  */
 export class FineGrainedStagingTracker {
-  private humanState: HumanWindowState = {
-    kind: "human",
-    files: new Set<string>(),
-    startedAt: null,
-    endedAt: null,
-    texts: new Map<string, TextSnapshot[]>(),
-  };
+  private humanState: HumanWindowState = emptyHumanWindow();
 
   private assistantState: AssistantWindowState | null = null;
 
@@ -396,8 +442,28 @@ export class FineGrainedStagingTracker {
     return (
       event.kind === "tool-called" &&
       event.capability === "tool-call" &&
+      event.toolCall === undefined &&
       collectEventFilePaths(event).length > 0
     );
+  }
+
+  /** Tracks the start and end of tool runs reported by `event` in the open assistant window. */
+  private applyToolCallPhase(event: AssistantEvent): void {
+    const state = this.assistantState;
+    if (!state || !event.toolCall) {
+      return;
+    }
+    const { id, phase } = event.toolCall;
+    if (phase === "started") {
+      state.runningTools.add(id ?? `${event.timestamp}:${state.runningTools.size}`);
+    } else if (id === undefined) {
+      // The turn is over: no tool is running any more, and an announced edit
+      // that has not appeared yet will not come (e.g. it was rejected).
+      state.runningTools.clear();
+      state.turnEnded = true;
+    } else {
+      state.runningTools.delete(id);
+    }
   }
 
   /** Records path-only workspace changes, preserving unrelated human edits during assistant windows. */
@@ -412,13 +478,35 @@ export class FineGrainedStagingTracker {
       this.humanState.texts.delete(filePath);
     }
 
+    this.routePathChanges(normalized, at);
+  }
+
+  /**
+   * Records on-disk changes seen by a file watcher (e.g. made by a shell
+   * command). Unlike `recordHumanChange`, this keeps editor text snapshots,
+   * because a watcher also reports every ordinary save.
+   */
+  recordDiskChange(paths: Iterable<string>, at = Date.now()): void {
+    const normalized = normalizePaths(paths);
+    for (const filePath of normalized) {
+      this.humanState.diskChanges.set(filePath, at);
+    }
+    this.routePathChanges(normalized, at);
+  }
+
+  /** Assigns changed paths to the open assistant window when it claims them, otherwise to the human window. */
+  private routePathChanges(normalized: string[], at: number): void {
+    if (normalized.length === 0) {
+      return;
+    }
+
     if (this.assistantState) {
       const knownAssistantFiles = this.assistantState.files;
-      const hasConcreteAssistantFiles = knownAssistantFiles.size > 0;
+      const claimsEverything = this.assistantState.openEnded;
       const humanPaths: string[] = [];
 
       for (const filePath of normalized) {
-        if (!hasConcreteAssistantFiles || knownAssistantFiles.has(filePath)) {
+        if (claimsEverything || knownAssistantFiles.has(filePath)) {
           this.assistantState.files.add(filePath);
           this.assistantState.lastActivityAt = at;
           this.assistantState.awaitingMaterialization = false;
@@ -444,7 +532,7 @@ export class FineGrainedStagingTracker {
     const normalizedChanges = Array.from(changes)
       .map((change) => ({
         ...change,
-        path: path.resolve(change.path),
+        path: normalizePath(change.path),
       }))
       .filter((change) => change.path.trim().length > 0);
 
@@ -462,11 +550,11 @@ export class FineGrainedStagingTracker {
     }
 
     const knownAssistantFiles = this.assistantState.files;
-    const hasConcreteAssistantFiles = knownAssistantFiles.size > 0;
+    const claimsEverything = this.assistantState.openEnded;
     const humanChanges: WorkspaceTextChange[] = [];
 
     for (const change of normalizedChanges) {
-      if (!hasConcreteAssistantFiles || knownAssistantFiles.has(change.path)) {
+      if (claimsEverything || knownAssistantFiles.has(change.path)) {
         this.assistantState.files.add(change.path);
         this.assistantState.lastActivityAt = at;
         this.assistantState.awaitingMaterialization = false;
@@ -508,6 +596,7 @@ export class FineGrainedStagingTracker {
       return;
     }
 
+    this.assistantState.materializations.push(change);
     const matchingEvents = this.assistantState.events.filter((event) =>
       normalizePaths(collectEventFilePaths(event)).includes(change.path)
     );
@@ -537,6 +626,9 @@ export class FineGrainedStagingTracker {
     this.humanState.endedAt = at;
     for (const filePath of normalized) {
       this.humanState.files.add(filePath);
+      if (!this.humanState.firstChangedAt.has(filePath)) {
+        this.humanState.firstChangedAt.set(filePath, at);
+      }
     }
   }
 
@@ -551,9 +643,36 @@ export class FineGrainedStagingTracker {
     event: AssistantEvent,
     at = Date.now()
   ): WindowCommit[] {
+    // Reads and searches change nothing: they never open a window or claim
+    // files, but keep an open window alive and may end running tools.
+    if (event.capability === "read-only") {
+      if (this.assistantState) {
+        this.assistantState.lastActivityAt = at;
+        this.assistantState.events.push(event);
+        this.applyToolCallPhase(event);
+      }
+      return [];
+    }
+
     const commits: WindowCommit[] = [];
     const assistantPaths = normalizePaths(collectEventFilePaths(event));
     const snapshots: Record<string, string> = {};
+    const claimsEverything = assistantPaths.length === 0 || event.capability === "command" || !!event.toolCall;
+
+    // A fast shell command can change files before its log line is read, so
+    // the watcher reports them as human changes first. Files the human did
+    // not edit in the editor and that changed just now belong to the run.
+    const claimedFromHuman = claimsEverything
+      ? Array.from(this.humanState.diskChanges)
+        .filter(([filePath, changedAt]) =>
+          this.humanState.files.has(filePath) &&
+          !this.humanState.texts.has(filePath) &&
+          at - changedAt <= RECENT_DISK_CHANGE_MS)
+        .map(([filePath]) => filePath)
+      : [];
+    for (const filePath of claimedFromHuman) {
+      this.humanState.files.delete(filePath);
+    }
 
     for (const filePath of assistantPaths) {
       const settled = (this.humanState.texts.get(filePath) ?? []).filter(
@@ -573,13 +692,7 @@ export class FineGrainedStagingTracker {
       }
       commits.push(humanCommit);
     }
-    this.humanState = {
-      kind: "human",
-      files: new Set<string>(),
-      startedAt: null,
-      endedAt: null,
-      texts: new Map<string, TextSnapshot[]>(),
-    };
+    this.humanState = emptyHumanWindow();
 
     if (!this.assistantState) {
       const awaitingMaterialization = this.isDeferredAssistantBoundary(event);
@@ -591,17 +704,40 @@ export class FineGrainedStagingTracker {
         events: [],
         fileAttributions: new Map<string, FileAttribution>(),
         awaitingMaterialization,
+        turnEnded: false,
+        openEnded: false,
+        runningTools: new Set<string>(),
+        materializations: [],
       };
     }
 
     this.assistantState.lastActivityAt = at;
     this.assistantState.events.push(event);
+    this.assistantState.turnEnded = false;
+    this.applyToolCallPhase(event);
+    if (claimsEverything) {
+      this.assistantState.openEnded = true;
+    }
+    for (const filePath of claimedFromHuman) {
+      this.assistantState.files.add(filePath);
+    }
     if (!this.isDeferredAssistantBoundary(event)) {
       this.assistantState.awaitingMaterialization = false;
     }
     for (const filePath of assistantPaths) {
       this.assistantState.files.add(filePath);
-      const next = attributionFromEvent(event, filePath);
+      let next = attributionFromEvent(event, filePath);
+      // The editor may report a change before the event carrying its evidence
+      // is parsed (e.g. a tool's post-execution log line), so match this event
+      // against changes already observed in the window as well.
+      for (const change of this.assistantState.materializations) {
+        if (change.path === filePath) {
+          next = mergeAttribution(
+            next,
+            materializationAttribution(event, filePath, change)
+          );
+        }
+      }
       const existing = this.assistantState.fileAttributions.get(filePath);
       this.assistantState.fileAttributions.set(
         filePath,
@@ -612,6 +748,62 @@ export class FineGrainedStagingTracker {
     return commits;
   }
 
+  /**
+   * Takes the changes a git command made (see `GitOperationWatcher`) out of
+   * the open windows, so they count as neither human nor assistant work.
+   * Human changes to those files from before `startedAt` stay human, with
+   * the editor text from before the command where there is one; the human
+   * window is committed first so the command's commit comes after it.
+   * Changes an assistant made with a tool that named the file stay the
+   * assistant's.
+   */
+  recordGitOperation(
+    paths: Iterable<string>,
+    operation: string,
+    startedAt: number,
+    at = Date.now()
+  ): { before: WindowCommit[]; operation: GitOperationCommit | null } {
+    const files = normalizePaths(paths);
+    if (files.length === 0) {
+      return { before: [], operation: null };
+    }
+
+    const snapshots: Record<string, string> = {};
+    for (const filePath of files) {
+      const firstChangedAt = this.humanState.firstChangedAt.get(filePath);
+      if (firstChangedAt === undefined || firstChangedAt >= startedAt) {
+        this.humanState.files.delete(filePath);
+        continue;
+      }
+      const earlier = (this.humanState.texts.get(filePath) ?? []).filter((t) => t.at < startedAt);
+      if (earlier.length > 0) {
+        snapshots[filePath] = earlier[earlier.length - 1].text;
+      }
+    }
+    const before: WindowCommit[] = [];
+    const humanCommit = finalizeHumanWindow(this.humanState);
+    if (humanCommit) {
+      if (Object.keys(snapshots).length > 0) {
+        humanCommit.snapshots = snapshots;
+      }
+      before.push(humanCommit);
+    }
+    this.humanState = emptyHumanWindow();
+
+    if (this.assistantState) {
+      for (const filePath of files) {
+        if (!this.assistantState.fileAttributions.has(filePath)) {
+          this.assistantState.files.delete(filePath);
+        }
+      }
+    }
+
+    return {
+      before,
+      operation: { kind: "git-operation", files, startedAt, endedAt: at, operation },
+    };
+  }
+
   /** Closes and returns the assistant window if its debounce timeout has elapsed. */
   flushAssistantWindowIfIdle(at = Date.now()): WindowCommit | null {
     if (!this.assistantState) {
@@ -619,7 +811,18 @@ export class FineGrainedStagingTracker {
     }
 
     if (
-      this.assistantState.awaitingMaterialization ||
+      this.assistantState.runningTools.size > 0 &&
+      at - this.assistantState.lastActivityAt < MAX_TOOL_RUN_IDLE_MS
+    ) {
+      return null;
+    }
+
+    // A window still awaiting its announced edit changed nothing; once the
+    // turn has ended (or after the safety limit) it is dropped without a commit.
+    if (
+      (this.assistantState.awaitingMaterialization &&
+        !this.assistantState.turnEnded &&
+        at - this.assistantState.lastActivityAt < MAX_TOOL_RUN_IDLE_MS) ||
       (this.assistantDebounceMs > 0 &&
         at - this.assistantState.lastActivityAt < this.assistantDebounceMs)
     ) {
@@ -654,13 +857,7 @@ export class FineGrainedStagingTracker {
     if (humanCommit) {
       commits.push(humanCommit);
     }
-    this.humanState = {
-      kind: "human",
-      files: new Set<string>(),
-      startedAt: null,
-      endedAt: null,
-      texts: new Map<string, TextSnapshot[]>(),
-    };
+    this.humanState = emptyHumanWindow();
 
     return commits;
   }
@@ -672,15 +869,8 @@ function formatIsoTimestamp(at: number): string {
 }
 
 function formatCommitPath(filePath: string, repoRoot?: string): string {
-  const absolute = path.resolve(filePath);
-  if (!repoRoot) {
-    return absolute;
-  }
-
-  const absRepo = path.resolve(repoRoot);
-  return absolute === absRepo || absolute.startsWith(absRepo + path.sep)
-    ? path.relative(repoRoot, absolute).split(path.sep).join("/")
-    : absolute;
+  const absolute = normalizePath(filePath);
+  return (repoRoot && relativePathInside(repoRoot, absolute)) || absolute;
 }
 
 function formatCommitPaths(files: string[], repoRoot?: string): string[] {
@@ -712,12 +902,25 @@ function assistantOriginLabel(origins: EditOrigin[]): string {
   }
 }
 
-/** Builds the git commit message for a human or assistant window commit. */
+/** Builds the git commit message for a human, assistant or git operation commit. */
 export function formatWindowCommitMessage(
   commit: WindowCommit,
   repoRoot?: string
 ): string {
   const files = formatCommitPaths(commit.files, repoRoot);
+
+  if (commit.kind === "git-operation") {
+    return [
+      `${EXTENSION_NAME}: git operation (${fileCountLabel(files.length)})`,
+      JSON.stringify({
+        kind: commit.kind,
+        operation: commit.operation,
+        files,
+        startedAt: formatIsoTimestamp(commit.startedAt),
+        endedAt: formatIsoTimestamp(commit.endedAt),
+      }),
+    ].join("\n");
+  }
 
   if (commit.kind === "human") {
     return [

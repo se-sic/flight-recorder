@@ -6,6 +6,7 @@ import {
   formatWindowCommitMessage,
   hashInsertedText,
 } from "../src/recording/staging-tracker";
+import { ClaudeCodeParser } from "../src/recording/agents/claude/parser";
 import type { AssistantEvent } from "../src/recording/event";
 
 /** The tracker resolves paths, so on Windows "/tmp/x" becomes "C:\tmp\x". */
@@ -222,6 +223,25 @@ test("assistant boundary drops overlapping files from the flushed human window",
   );
 });
 
+test("assistant boundary matches files whose Windows drive letters differ in case", { skip: process.platform !== "win32" }, () => {
+  const tracker = new FineGrainedStagingTracker(1_000);
+
+  // VS Code reports `e:\...`, Claude Code reports `E:\...`.
+  tracker.recordHumanChange(["e:\\repo\\test.txt"], 1_000);
+
+  const commits = tracker.recordAssistantEvent(
+    makeAssistantEvent({
+      fileOperations: [{ kind: "create", path: "E:\\repo\\test.txt" }],
+    }),
+    2_000
+  );
+
+  assert.equal(commits.length, 0);
+  const assistantCommit = tracker.flushAll(4_000)[0];
+  assert.equal(assistantCommit.kind, "assistant");
+  assert.deepEqual(assistantCommit.files, ["E:\\repo\\test.txt"]);
+});
+
 test("assistant boundary keeps earlier human text of a shared file", () => {
   const tracker = new FineGrainedStagingTracker(1_000);
   const shared = path.resolve("/tmp/shared.ts");
@@ -404,4 +424,344 @@ test("human commit messages include file count and one metadata payload", () => 
   assert.equal(lines.length, 2);
   assert.equal(lines[0], "Flight Recorder: human edits (2 files)");
   assert.match(lines[1], /"kind":"human"/);
+});
+
+/** Builds a text change for `file` whose document text afterwards is `text`. */
+function textChange(file: string, text: string) {
+  return {
+    path: file,
+    insertedTextHashes: [hashInsertedText(text)],
+    insertedTextLength: text.length,
+    ranges: [{ startLine: 0, startColumn: 0, endLine: 0, endColumn: 0 }],
+    text,
+  };
+}
+
+test("a long session alternates human and assistant windows with correct files and snapshots", () => {
+  const tracker = new FineGrainedStagingTracker(1_000);
+  const [a, b, c] = resolved("/tmp/a.ts", "/tmp/b.ts", "/tmp/c.ts");
+  const editOf = (...files: string[]) =>
+    makeAssistantEvent({ fileOperations: files.map((file) => ({ kind: "update" as const, path: file })) });
+
+  // Human edits a; the assistant then edits a and b.
+  tracker.recordTextDocumentChange([textChange(a, "human 1")], 1_000);
+  const first = tracker.recordAssistantEvent(editOf(a, b), 3_000);
+  assert.equal(first.length, 1);
+  assert.equal(first[0].kind, "human");
+  assert.deepEqual(first[0].files, [a]);
+  assert.deepEqual(first[0].kind === "human" && first[0].snapshots, { [a]: "human 1" });
+
+  // Assistant text lands in a; meanwhile the human edits c.
+  tracker.recordTextDocumentChange([textChange(a, "human 1 + assistant")], 3_100);
+  tracker.recordTextDocumentChange([textChange(c, "human c")], 3_500);
+  assert.equal(tracker.flushAssistantWindowIfIdle(3_900), null);
+  const assistant = tracker.flushAssistantWindowIfIdle(4_200);
+  assert.equal(assistant?.kind, "assistant");
+  assert.ok(assistant?.files.includes(a));
+  assert.equal(assistant?.files.includes(c), false);
+
+  // Human edits a again; the next assistant event flushes a and c as human.
+  tracker.recordTextDocumentChange([textChange(a, "human 2")], 5_000);
+  const second = tracker.recordAssistantEvent(editOf(a), 7_000);
+  assert.equal(second.length, 1);
+  assert.deepEqual(second[0].files, [a, c].sort());
+  assert.deepEqual(second[0].kind === "human" && second[0].snapshots, { [a]: "human 2" });
+
+  // Shutdown closes the open assistant window.
+  const rest = tracker.flushAll(8_000);
+  assert.deepEqual(rest.map((commit) => commit.kind), ["assistant"]);
+  assert.deepEqual(tracker.flushAll(9_000), []);
+});
+
+test("a delete or rename after a human text edit drops the stale snapshot", () => {
+  const tracker = new FineGrainedStagingTracker(1_000);
+  const [d, e] = resolved("/tmp/d.ts", "/tmp/e.ts");
+
+  tracker.recordTextDocumentChange([textChange(d, "draft")], 1_000);
+  tracker.recordTextDocumentChange([textChange(e, "other")], 1_000);
+  tracker.recordHumanChange([d], 1_500);
+  const [human] = tracker.recordAssistantEvent(
+    makeAssistantEvent({
+      fileOperations: [{ kind: "update", path: d }, { kind: "update", path: e }],
+    }),
+    3_000
+  );
+
+  assert.equal(human.kind, "human");
+  const snapshots = human.kind === "human" ? human.snapshots ?? {} : {};
+  assert.equal(d in snapshots, false);
+  assert.equal(snapshots[e], "other");
+});
+
+test("human text younger than the assistant event lag is not used as a snapshot", () => {
+  const tracker = new FineGrainedStagingTracker(1_000);
+  const [f] = resolved("/tmp/f.ts");
+
+  tracker.recordTextDocumentChange([textChange(f, "settled human text")], 1_000);
+  tracker.recordTextDocumentChange([textChange(f, "probably the assistant")], 2_600);
+  const [human] = tracker.recordAssistantEvent(
+    makeAssistantEvent({ fileOperations: [{ kind: "update", path: f }] }),
+    3_000
+  );
+
+  assert.deepEqual(human.kind === "human" && human.snapshots, { [f]: "settled human text" });
+});
+
+/** Parses Claude hook payloads for `/tmp/...` files into assistant events. */
+function claudeHooks(...payloads: Array<Record<string, unknown>>): AssistantEvent[] {
+  const parser = new ClaudeCodeParser();
+  return Array.from(
+    parser.feed(payloads.map((payload) => `${JSON.stringify({ session_id: "s", cwd: "/tmp", ...payload })}\n`).join(""))
+  );
+}
+
+test("a file the assistant only read stays human-owned when the human edits it later", () => {
+  const tracker = new FineGrainedStagingTracker(1_000);
+  const [file] = resolved("/tmp/readme.md");
+  let at = 10_000;
+  for (const event of claudeHooks(
+    { hook_event_name: "PreToolUse", tool_name: "Read", tool_input: { file_path: file } },
+    { hook_event_name: "PostToolUse", tool_name: "Read", tool_input: { file_path: file } }
+  )) {
+    assert.deepEqual(tracker.recordAssistantEvent(event, at += 100), []);
+  }
+
+  tracker.recordHumanChange([file], at + 6_000);
+
+  assert.equal(tracker.flushAssistantWindowIfIdle(at + 9_000), null);
+  assert.deepEqual(
+    tracker.flushAll(at + 10_000).map((commit) => [commit.kind, commit.files]),
+    [["human", [file]]]
+  );
+});
+
+test("reads inside an edit window keep it alive without making its attribution mixed", () => {
+  const tracker = new FineGrainedStagingTracker(1_000);
+  const [file] = resolved("/tmp/index.js");
+  const input = { file_path: file, old_string: "a", new_string: "b" };
+  let at = 10_000;
+  for (const event of claudeHooks(
+    { hook_event_name: "PreToolUse", tool_name: "Edit", tool_input: input },
+    { hook_event_name: "PreToolUse", tool_name: "Read", tool_input: { file_path: file } },
+    { hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: input, tool_response: { filePath: file } }
+  )) {
+    tracker.recordAssistantEvent(event, at += 400);
+  }
+
+  const commit = tracker.flushAssistantWindowIfIdle(at + 1_100);
+
+  assert.equal(commit?.kind, "assistant");
+  assert.deepEqual(commit?.kind === "assistant" && commit.fileAttributions.map((a) => a.origin), ["assistant-tool-edit"]);
+  assert.deepEqual(commit?.kind === "assistant" && commit.origins, ["assistant-tool-edit"]);
+});
+
+test("a running shell command keeps its window open and claims every change it makes", () => {
+  const tracker = new FineGrainedStagingTracker(1_000);
+  const [a, b] = resolved("/tmp/a.ts", "/tmp/b.ts");
+  const [pre, post] = claudeHooks(
+    { hook_event_name: "PreToolUse", tool_name: "Bash", tool_use_id: "t1", tool_input: { command: "npm run gen" } },
+    { hook_event_name: "PostToolUse", tool_name: "Bash", tool_use_id: "t1", tool_input: { command: "npm run gen" } }
+  );
+
+  tracker.recordAssistantEvent(pre, 10_000);
+  tracker.recordDiskChange([a], 10_500);
+  assert.equal(tracker.flushAssistantWindowIfIdle(20_000), null, "still running after the debounce");
+  tracker.recordDiskChange([b], 25_000);
+  tracker.recordAssistantEvent(post, 26_000);
+  assert.equal(tracker.flushAssistantWindowIfIdle(26_500), null);
+
+  const commit = tracker.flushAssistantWindowIfIdle(27_100);
+  assert.equal(commit?.kind, "assistant");
+  assert.deepEqual(commit?.files, [a, b]);
+  assert.deepEqual(tracker.flushAll(28_000), []);
+});
+
+test("a command without a finish signal ends at the next prompt, or after the safety timeout", () => {
+  const [pre] = claudeHooks(
+    { hook_event_name: "PreToolUse", tool_name: "Bash", tool_use_id: "t1", tool_input: { command: "sleep 100" } }
+  );
+  const [prompt] = claudeHooks({ hook_event_name: "UserPromptSubmit", prompt: "next" });
+
+  const interrupted = new FineGrainedStagingTracker(1_000);
+  interrupted.recordAssistantEvent(pre, 10_000);
+  interrupted.recordDiskChange(resolved("/tmp/x.ts"), 10_100);
+  interrupted.recordAssistantEvent(prompt, 30_000);
+  assert.equal(interrupted.flushAssistantWindowIfIdle(31_100)?.kind, "assistant");
+
+  const silent = new FineGrainedStagingTracker(1_000);
+  silent.recordAssistantEvent(pre, 10_000);
+  silent.recordDiskChange(resolved("/tmp/x.ts"), 10_100);
+  assert.equal(silent.flushAssistantWindowIfIdle(10_100 + 4 * 60_000), null);
+  assert.equal(silent.flushAssistantWindowIfIdle(10_100 + 5 * 60_000)?.kind, "assistant");
+});
+
+test("disk changes reported for ordinary saves keep the human snapshot", () => {
+  const tracker = new FineGrainedStagingTracker(1_000);
+  const [file] = resolved("/tmp/saved.ts");
+
+  tracker.recordTextDocumentChange([textChange(file, "human text")], 1_000);
+  tracker.recordDiskChange([file], 1_200);
+  const [human] = tracker.recordAssistantEvent(
+    makeAssistantEvent({ fileOperations: [{ kind: "update", path: file }] }),
+    3_000
+  );
+
+  assert.deepEqual(human.kind === "human" && human.snapshots, { [file]: "human text" });
+});
+
+/** A shell tool run starting, as Claude's PreToolUse Bash or OpenCode's `pre` shell record. */
+function shellStarted(): AssistantEvent {
+  return makeAssistantEvent({
+    kind: "tool-called",
+    capability: "command",
+    fileOperations: [],
+    toolCall: { id: "shell-1", phase: "started" },
+  });
+}
+
+test("a shell run claims on-disk changes the watcher reported just before its log line", () => {
+  const tracker = new FineGrainedStagingTracker(1000);
+  tracker.recordTextDocumentChange(
+    [{ path: "/tmp/typed.md", insertedTextHashes: [], insertedTextLength: 5, ranges: [], text: "typed" }],
+    500
+  );
+  // The command wrote notes.txt; the watcher saw it 150 ms before the log line was read.
+  tracker.recordDiskChange(["/tmp/notes.txt"], 1_000);
+
+  const [human] = tracker.recordAssistantEvent(shellStarted(), 1_150);
+  const commits = tracker.flushAll(10_000);
+
+  assert.deepEqual(human.files, resolved("/tmp/typed.md"));
+  assert.deepEqual(commits.map((commit) => [commit.kind, commit.files]), [["assistant", resolved("/tmp/notes.txt")]]);
+});
+
+test("a shell run leaves older on-disk changes and editor-typed files with the human", () => {
+  const tracker = new FineGrainedStagingTracker(1000);
+  tracker.recordDiskChange(["/tmp/generated-earlier.txt"], 1_000);
+  tracker.recordTextDocumentChange(
+    [{ path: "/tmp/typed.md", insertedTextHashes: [], insertedTextLength: 5, ranges: [], text: "typed" }],
+    5_900
+  );
+  tracker.recordDiskChange(["/tmp/typed.md"], 5_950); // the save
+
+  const [human] = tracker.recordAssistantEvent(shellStarted(), 6_000);
+
+  assert.deepEqual(human.files, resolved("/tmp/generated-earlier.txt", "/tmp/typed.md"));
+});
+
+test("an edit event naming one file does not claim unrelated on-disk changes", () => {
+  const tracker = new FineGrainedStagingTracker(1000);
+  tracker.recordDiskChange(["/tmp/other.txt"], 1_000);
+
+  const [human] = tracker.recordAssistantEvent(makeAssistantEvent({ fileOperations: [{ kind: "update", path: "/tmp/demo.ts" }] }), 1_100);
+
+  assert.deepEqual(human.files, resolved("/tmp/other.txt"));
+});
+
+test("an edit Claude announced but never made (rejected) does not claim later human edits", () => {
+  const parser = new ClaudeCodeParser();
+  const parse = (payload: Record<string, unknown>) => Array.from(parser.feed(`${JSON.stringify(payload)}\n`));
+  const toolInput = { file_path: "/tmp/rejected.ts", old_string: "a", new_string: "b" };
+  const tracker = new FineGrainedStagingTracker(1000);
+  const commits = [];
+
+  for (const event of parse({ hook_event_name: "PreToolUse", tool_name: "Edit", tool_input: toolInput })) {
+    commits.push(...tracker.recordAssistantEvent(event, 1_000));
+  }
+  // The participant rejects the edit: no PostToolUse, no file change, the turn ends.
+  for (const event of parse({ hook_event_name: "Stop" })) {
+    commits.push(...tracker.recordAssistantEvent(event, 1_500));
+  }
+  const idle = tracker.flushAssistantWindowIfIdle(3_000);
+  tracker.recordTextDocumentChange(
+    [{ path: "/tmp/rejected.ts", insertedTextHashes: [], insertedTextLength: 1, ranges: [], text: "manual" }],
+    10_000
+  );
+  commits.push(...tracker.flushAll(20_000));
+
+  assert.equal(idle, null, "the unmaterialized window is dropped without a commit");
+  assert.deepEqual(commits.map((commit) => [commit.kind, commit.files]), [["human", resolved("/tmp/rejected.ts")]]);
+});
+
+test("without a turn end, an announced edit stops waiting after the safety limit", () => {
+  const tracker = new FineGrainedStagingTracker(1000);
+  tracker.recordAssistantEvent(makeAssistantEvent({ kind: "tool-called", capability: "tool-call", fileOperations: [{ kind: "update", path: "/tmp/never.ts" }] }), 1_000);
+
+  // Still waiting a minute later, then dropped after the five-minute limit.
+  assert.equal(tracker.flushAssistantWindowIfIdle(60_000), null);
+  assert.equal(tracker.flushAssistantWindowIfIdle(6 * 60_000), null);
+  tracker.recordTextDocumentChange(
+    [{ path: "/tmp/never.ts", insertedTextHashes: [], insertedTextLength: 1, ranges: [], text: "y" }],
+    6 * 60_000 + 100
+  );
+
+  assert.deepEqual(tracker.flushAll(7 * 60_000).map((commit) => [commit.kind, commit.files]), [["human", resolved("/tmp/never.ts")]]);
+});
+
+test("a git operation takes its files out of the human window and keeps earlier human text", () => {
+  const tracker = new FineGrainedStagingTracker(1_000);
+  const [edited, pulled, other] = resolved("/tmp/edited.ts", "/tmp/pulled.ts", "/tmp/other.ts");
+
+  // The human typed in `edited` and `other`, then stashed; git rewrote `edited` and `pulled`.
+  tracker.recordTextDocumentChange([textChange(edited, "typed by hand")], 1_000);
+  tracker.recordTextDocumentChange([textChange(other, "other text")], 2_000);
+  tracker.recordDiskChange([pulled], 5_100);
+  tracker.recordTextDocumentChange([textChange(edited, "reloaded from git")], 5_200);
+  const { before, operation } = tracker.recordGitOperation([edited, pulled], "stash", 5_000, 5_500);
+
+  assert.deepEqual(before.map((commit) => [commit.kind, commit.files]), [["human", [edited, other].sort()]]);
+  assert.deepEqual(before[0].kind === "human" && before[0].snapshots, { [edited]: "typed by hand" });
+  assert.deepEqual(operation, {
+    kind: "git-operation",
+    files: [edited, pulled].sort(),
+    startedAt: 5_000,
+    endedAt: 5_500,
+    operation: "stash",
+  });
+  assert.deepEqual(tracker.flushAll(6_000), [], "nothing is left over");
+});
+
+test("a git operation run by a shell command is not claimed by the assistant", () => {
+  const tracker = new FineGrainedStagingTracker(1_000);
+  const [pulled, edited] = resolved("/tmp/pulled.ts", "/tmp/edited.ts");
+  const [bash] = claudeHooks({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_use_id: "t1", tool_input: { command: "git pull" } });
+  const [edit] = claudeHooks({ hook_event_name: "PostToolUse", tool_name: "Edit", tool_use_id: "t0", tool_input: { file_path: edited, old_string: "a", new_string: "b" } });
+
+  tracker.recordAssistantEvent(edit, 1_000);
+  tracker.recordDiskChange([edited], 1_100);
+  tracker.recordAssistantEvent(bash, 2_000);
+  tracker.recordDiskChange([pulled], 2_300);
+  const { before, operation } = tracker.recordGitOperation([pulled, edited], "pull: Fast-forward", 2_200, 2_600);
+
+  assert.deepEqual(before, []);
+  assert.deepEqual(operation?.files, [pulled, edited].sort());
+  const [assistant] = tracker.flushAll(10_000);
+  assert.deepEqual(assistant.files, [edited], "the file the assistant edited by name stays its own");
+});
+
+test("a git operation commit message names the operation", () => {
+  const message = formatWindowCommitMessage(
+    { kind: "git-operation", files: resolved("/repo/a.ts"), startedAt: 0, endedAt: 1_000, operation: "pull: Fast-forward" },
+    path.resolve("/repo")
+  );
+  const [subject, body] = message.split("\n");
+  assert.equal(subject, "Flight Recorder: git operation (1 file)");
+  assert.deepEqual(JSON.parse(body), {
+    kind: "git-operation",
+    operation: "pull: Fast-forward",
+    files: ["a.ts"],
+    startedAt: "1970-01-01T00:00:00.000Z",
+    endedAt: "1970-01-01T00:00:01.000Z",
+  });
+});
+
+test("an assistant commit lists the files whose change it saw in an editor", () => {
+  const tracker = new FineGrainedStagingTracker(1_000);
+  const [completed, onDisk] = resolved("/tmp/completed.ts", "/tmp/on-disk.ts");
+  tracker.recordAssistantEvent(makeAssistantEvent({ fileOperations: [{ kind: "update", path: completed }, { kind: "update", path: onDisk }] }), 1_000);
+  tracker.recordTextDocumentChange([textChange(completed, "completion")], 1_100);
+  tracker.recordDiskChange([onDisk], 1_200);
+
+  const [commit] = tracker.flushAll(5_000);
+  assert.deepEqual(commit.kind === "assistant" && commit.editedInEditor, [completed]);
 });

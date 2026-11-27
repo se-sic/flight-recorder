@@ -1,7 +1,9 @@
-import * as path from "path";
+import * as crypto from "crypto";
+import { normalizePath } from "../../../utils/fs-path";
 import {
   AssistantCapability,
   AssistantEvent,
+  AttributionEvidence,
   FileOperation,
 } from "../../event";
 
@@ -15,14 +17,111 @@ type ClaudeHookEventPayload = {
   file_path?: string;
   event?: string;
   cwd?: string;
+  tool_use_id?: string;
 };
 
+/** Claude Code tools that only read or search and never change files. */
+const READ_ONLY_TOOLS = new Set([
+  "Read",
+  "Grep",
+  "Glob",
+  "LS",
+  "NotebookRead",
+  "WebFetch",
+  "WebSearch",
+  "TodoRead",
+  "TodoWrite",
+  "BashOutput",
+  "ExitPlanMode",
+  "ListMcpResourcesTool",
+  "ReadMcpResourceTool",
+]);
+
 type ClaudeTranscriptEntry = Record<string, unknown>;
+
+/** Hashes text the same way the staging tracker hashes inserted editor text. */
+function hashText(text: string): string {
+  return crypto.createHash("sha256").update(text).digest("hex");
+}
+
+/**
+ * Returns the lines of `next` that replace lines of `previous`, joined with a
+ * trailing newline: the text VS Code reports as inserted when it reloads a
+ * file changed on disk, which diffs whole lines.
+ */
+function addedLinesText(previous: string, next: string): string | null {
+  const oldLines = previous.split("\n");
+  const newLines = next.split("\n");
+  let prefix = 0;
+  while (prefix < oldLines.length && prefix < newLines.length && oldLines[prefix] === newLines[prefix]) {
+    prefix++;
+  }
+  let suffix = 0;
+  while (
+    suffix < oldLines.length - prefix &&
+    suffix < newLines.length - prefix &&
+    oldLines[oldLines.length - 1 - suffix] === newLines[newLines.length - 1 - suffix]
+  ) {
+    suffix++;
+  }
+  const added = newLines.slice(prefix, newLines.length - suffix);
+  return added.length > 0 ? added.join("\n") + "\n" : null;
+}
+
+/**
+ * Builds text evidence for a Claude file-edit tool from its input: hashes of
+ * the new text as written and of the whole lines it adds, so the staging
+ * tracker can match them against the editor's observed changes.
+ */
+function editToolEvidence(
+  toolName: string,
+  toolInput: Record<string, unknown> | undefined,
+  sessionId: string | undefined,
+  timestamp: string
+): AttributionEvidence[] {
+  if (!toolInput) {
+    return [];
+  }
+  const pairs: Array<[string, string]> = [];
+  const pushPair = (edit: unknown) => {
+    const { old_string: before, new_string: after } = (edit ?? {}) as Record<string, unknown>;
+    if (typeof after === "string" && after.length > 0) {
+      pairs.push([typeof before === "string" ? before : "", after]);
+    }
+  };
+  if (toolName === "Edit") {
+    pushPair(toolInput);
+  } else if (toolName === "MultiEdit" && Array.isArray(toolInput.edits)) {
+    toolInput.edits.forEach(pushPair);
+  } else if (toolName === "Write" && typeof toolInput.content === "string" && toolInput.content.length > 0) {
+    pairs.push(["", toolInput.content]);
+  }
+
+  const hashes = new Set<string>();
+  for (const [before, after] of pairs) {
+    hashes.add(hashText(after));
+    const added = addedLinesText(before, after);
+    if (added) {
+      hashes.add(hashText(added));
+    }
+  }
+  if (hashes.size === 0) {
+    return [];
+  }
+  return collectStringPaths(toolInput).map((filePath) => ({
+    type: "claude-tool-input",
+    confidence: "high",
+    sessionId,
+    path: filePath,
+    timestamp,
+    details: { editTextHashes: Array.from(hashes) },
+  }));
+}
 
 /** Extracts and resolves file path strings from a tool input value, checking common path-like field names and a `file_paths` array. */
 function collectStringPaths(input: unknown): string[] {
   if (typeof input === "string" && input.trim()) {
-    return [path.resolve(input)];
+    return [normalizePath(input)];
   }
 
   if (typeof input !== "object" || input === null) {
@@ -45,14 +144,14 @@ function collectStringPaths(input: unknown): string[] {
   ]) {
     const value = inputObj[key];
     if (typeof value === "string" && value.trim()) {
-      filePaths.add(path.resolve(value));
+      filePaths.add(normalizePath(value));
     }
   }
 
   if (Array.isArray(inputObj.file_paths)) {
     for (const candidate of inputObj.file_paths) {
       if (typeof candidate === "string" && candidate.trim()) {
-        filePaths.add(path.resolve(candidate));
+        filePaths.add(normalizePath(candidate));
       }
     }
   }
@@ -67,6 +166,9 @@ function mapToolNameToCapability(toolName: string): AssistantCapability {
   }
   if (toolName === "Bash") {
     return "command";
+  }
+  if (READ_ONLY_TOOLS.has(toolName)) {
+    return "read-only";
   }
   if (toolName.startsWith("mcp__")) {
     return "tool-call";
@@ -116,7 +218,7 @@ function mapHookFileChangedOperation(payload: ClaudeHookEventPayload): FileOpera
     return [];
   }
 
-  const resolved = path.resolve(payload.file_path);
+  const resolved = normalizePath(payload.file_path);
   switch (payload.event) {
     case "add":
       return [{ kind: "create", path: resolved }];
@@ -151,7 +253,7 @@ function mapHookToolResponseOperation(
     return inferFileOperationsFromTool(fallbackToolName, fallbackToolInput);
   }
 
-  const resolved = path.resolve(responseFilePath);
+  const resolved = normalizePath(responseFilePath);
   const responseType =
     typeof toolResponse?.type === "string" ? toolResponse.type : undefined;
 
@@ -265,6 +367,8 @@ export class ClaudeCodeParser {
           fileOperations: inferFileOperationsFromTool(toolName, payload.tool_input),
           sessionId: payload.session_id,
           toolName,
+          origin: "assistant-tool-edit",
+          evidence: editToolEvidence(toolName, payload.tool_input, payload.session_id, timestamp),
           metadata: {
             transcriptPath: payload.transcript_path,
             cwd: payload.cwd,
@@ -290,6 +394,8 @@ export class ClaudeCodeParser {
           ),
           sessionId: payload.session_id,
           toolName,
+          origin: "assistant-tool-edit",
+          evidence: editToolEvidence(toolName, payload.tool_input, payload.session_id, timestamp),
           metadata: {
             transcriptPath: payload.transcript_path,
             cwd: payload.cwd,
@@ -299,10 +405,20 @@ export class ClaudeCodeParser {
         };
       }
 
+      const capability = mapToolNameToCapability(toolName);
+      // Tools other than edits and reads (Bash, MCP tools, subagents, ...)
+      // may change any file while they run; mark their start and end.
+      const toolCall: AssistantEvent["toolCall"] =
+        capability === "read-only" || isFileEditTool
+          ? undefined
+          : {
+            id: payload.tool_use_id,
+            phase: payload.hook_event_name === "PreToolUse" ? "started" : "finished",
+          };
       return {
         timestamp,
         kind: "tool-called",
-        capability: mapToolNameToCapability(toolName),
+        capability,
         source: {
           assistantId: "claude-code",
           adapterId: "claude-hook-log-parser",
@@ -311,11 +427,29 @@ export class ClaudeCodeParser {
         fileOperations: inferFileOperationsFromTool(toolName, payload.tool_input),
         sessionId: payload.session_id,
         toolName,
+        ...(toolCall ? { toolCall } : {}),
         metadata: {
           transcriptPath: payload.transcript_path,
           cwd: payload.cwd,
           toolInput: payload.tool_input,
         },
+      };
+    }
+
+    // A finished turn or a new prompt means no tool from before is still running.
+    if (payload.hook_event_name === "Stop" || payload.hook_event_name === "UserPromptSubmit") {
+      return {
+        timestamp,
+        kind: "response-produced",
+        capability: "read-only",
+        source: {
+          assistantId: "claude-code",
+          adapterId: "claude-hook-log-parser",
+          rawSignal: payload.hook_event_name,
+        },
+        fileOperations: [],
+        sessionId: payload.session_id,
+        toolCall: { phase: "finished" },
       };
     }
 
@@ -392,10 +526,11 @@ export class ClaudeCodeParser {
         fileOperations: [
           {
             kind: inferOperationKindFromToolResult(toolUseResult),
-            path: path.resolve(toolResultFilePath),
+            path: normalizePath(toolResultFilePath),
           },
         ],
         sessionId,
+        origin: "assistant-tool-edit",
         metadata: {
           structuredPatch: toolUseResult.structuredPatch,
           userModified: toolUseResult.userModified,
@@ -457,6 +592,8 @@ export class ClaudeCodeParser {
           fileOperations: inferFileOperationsFromTool(toolName, toolInput),
           sessionId,
           toolName,
+          origin: "assistant-tool-edit",
+          evidence: editToolEvidence(toolName, toolInput, sessionId, timestampValue),
           metadata: toolInput ? { toolInput } : undefined,
         });
         continue;

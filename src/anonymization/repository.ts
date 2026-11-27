@@ -4,6 +4,7 @@ import * as path from "path";
 import { spawn } from "child_process";
 import * as vscode from "vscode";
 import { gitCmd } from "../utils/git";
+import { uriToPath } from "../utils/fs-path";
 import {
   AbsolutePathHandling,
   absolutePathReplacementExpressions,
@@ -381,7 +382,7 @@ export async function anonymizeCurrentRepository(
     canSelectMany: false,
     openLabel: "Select anonymized repo destination",
   });
-  const targetFolder = targetFolderPick?.[0]?.fsPath;
+  const targetFolder = targetFolderPick?.[0] ? uriToPath(targetFolderPick[0]) : undefined;
   if (!targetFolder) {
     return {
       ok: false,
@@ -526,6 +527,21 @@ export async function anonymizeCurrentRepository(
       );
     }
     createdDestination = true;
+
+    // A clone only checks out the default branch; the other branches (above
+    // all the flight-recorder/* recordings) exist only as remote-tracking refs
+    // and would disappear with the remote. Copy every branch to a local one.
+    const branchesRes = await gitCmd(
+      ["fetch", "--update-head-ok", "origin", "+refs/heads/*:refs/heads/*"],
+      destRepoPath
+    );
+    if (branchesRes.code !== 0) {
+      return formatGitFailure(
+        "Failed to copy all branches into the anonymized repository.",
+        branchesRes.err,
+        branchesRes.out
+      );
+    }
 
     // Remove the original remote so the anonymized repository cannot be pushed
     // back to the source repository by accident.

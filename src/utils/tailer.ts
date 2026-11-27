@@ -1,9 +1,12 @@
 import * as fs from "fs";
+import { StringDecoder } from "string_decoder";
 
 /** Incrementally reads newly appended content from a growing file, tracking a byte offset across reads. */
 export class Tailer {
   private fd: number | null = null;
   private offset = 0;
+  // Keeps an incomplete UTF-8 sequence until the rest of it is appended.
+  private decoder = new StringDecoder("utf8");
 
   constructor(private filePath: string) {}
 
@@ -35,6 +38,7 @@ export class Tailer {
     if (st.size < this.offset) {
       // rotated/truncated
       this.offset = 0;
+      this.decoder = new StringDecoder("utf8");
     }
     const len = st.size - this.offset;
     if (len <= 0) {
@@ -44,6 +48,6 @@ export class Tailer {
     const buf = Buffer.alloc(len);
     fs.readSync(this.fd, buf, 0, len, this.offset);
     this.offset = st.size;
-    return buf.toString("utf8");
+    return this.decoder.write(buf);
   }
 }

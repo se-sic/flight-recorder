@@ -487,17 +487,18 @@ async function readFileContentAtRevision(
   };
 }
 
-/** Lists every commit (oldest first) that touched a file, following renames, via `git log --follow`. */
+/** Lists every commit (oldest first) up to `revision` that touched a file, following renames, via `git log --follow`. */
 async function listFileCommits(
   repoRoot: string,
-  repoRelativePath: string
+  repoRelativePath: string,
+  revision: string
 ): Promise<
   | { ok: true; commits: CommitMetadata[] }
   | { ok: false; failure: VisualizationGitFailure }
 > {
   const format = "%H%x09%at%x09%an%x09%s";
   const result = await gitCmd(
-    ["log", "--follow", `--format=${format}`, "--", repoRelativePath],
+    ["log", "--follow", `--format=${format}`, revision, "--", repoRelativePath],
     repoRoot
   );
   if (result.code !== 0) {
@@ -589,14 +590,15 @@ const blameCache = new Map<string, BlameCacheEntry>();
  * load the first snapshot and assign it entirely to that commit; for each
  * later commit, diff against the previous one with zero context and patch
  * the attribution state forward so only changed tokens move to the newer
- * commit; if the working tree differs from HEAD, apply one more patch step
+ * commit; if the working tree differs from `revision` (default HEAD), apply one more patch step
  * marking new spans as uncommitted; finally convert the span list into
  * editor ranges. Results are cached per file/repo keyed on current text.
  */
 export async function buildFileOwnershipRanges(
   repoRoot: string,
   repoRelativePath: string,
-  currentText: string
+  currentText: string,
+  revision = "HEAD"
 ): Promise<
   | {
       ok: true;
@@ -608,13 +610,13 @@ export async function buildFileOwnershipRanges(
       failure: VisualizationGitFailure;
     }
 > {
-  const cacheKey = `${repoRoot}\0${repoRelativePath}`;
+  const cacheKey = `${repoRoot}\0${revision}\0${repoRelativePath}`;
   const cached = blameCache.get(cacheKey);
   if (cached && cached.text === currentText) {
     return cached.result;
   }
 
-  const commitsResult = await listFileCommits(repoRoot, repoRelativePath);
+  const commitsResult = await listFileCommits(repoRoot, repoRelativePath, revision);
   if (!commitsResult.ok) {
     return commitsResult;
   }
@@ -652,7 +654,7 @@ export async function buildFileOwnershipRanges(
         )
       )
     ),
-    gitCmd(["diff", "--unified=0", "--no-color", "HEAD", "--", repoRelativePath], repoRoot),
+    gitCmd(["diff", "--unified=0", "--no-color", revision, "--", repoRelativePath], repoRoot),
   ]);
 
   for (const r of allContentsResults) {

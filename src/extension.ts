@@ -6,20 +6,37 @@ import {
 } from "./visualization/controller";
 import {
   exportAllChats,
+  getPanelBranchState,
+  getRecordingBranchState,
   initializeRecordingContext,
+  LAST_RECORDING_BRANCH_STATE_KEY,
+  listUnfinishedRecordings,
+  RecordingBranchUiState,
   initializeRecordingStatusBar,
   isRecording,
+  restoreRecordingBranchState,
   showAssistantLogPath,
   startRecording,
   stopRecording,
   deactivateRecording,
 } from "./recording/session";
+import { initializeRecordingHistoryPanel } from "./history-panel/controller";
 import { configureClaudeHooks } from "./recording/agents/claude/hooks";
+import { configureOpenCodePlugin } from "./recording/agents/opencode/setup";
 import { COMMAND_STATUS, EXTENSION_NAME } from "./utils/constants";
 import { initializeLogChannel } from "./utils/logging";
 
+/** Read-only state returned from `activate`, used by the end-to-end tests. */
+export type FlightRecorderApi = {
+  isRecording: () => boolean;
+  getRecordingBranchState: () => RecordingBranchUiState | null;
+  getPersistedRecordingBranchState: () => RecordingBranchUiState | undefined;
+  listUnfinishedRecordings: typeof listUnfinishedRecordings;
+  getPanelBranchState: typeof getPanelBranchState;
+};
+
 /** Extension activation entry point: sets up logging, the recording status bar item, and registers all commands. */
-export function activate(context: vscode.ExtensionContext) {
+export function activate(context: vscode.ExtensionContext): FlightRecorderApi {
   // Initialize global logging channel
   const outputChannel = initializeLogChannel(EXTENSION_NAME);
   context.subscriptions.push(outputChannel);
@@ -31,6 +48,8 @@ export function activate(context: vscode.ExtensionContext) {
   recordingStatusBarItem.name = EXTENSION_NAME + " recording status";
   initializeRecordingStatusBar(recordingStatusBarItem);
   void initializeRecordingContext();
+  restoreRecordingBranchState(context);
+  initializeRecordingHistoryPanel(context);
   context.subscriptions.push(recordingStatusBarItem);
 
   const startCmd = vscode.commands.registerCommand(
@@ -84,6 +103,13 @@ export function activate(context: vscode.ExtensionContext) {
     }
   );
 
+  const configureOpenCodePluginCmd = vscode.commands.registerCommand(
+    "flightRecorder.configureOpenCodePlugin",
+    async () => {
+      await configureOpenCodePlugin();
+    }
+  );
+
   const anonymizeRepoCmd = vscode.commands.registerCommand(
     "flightRecorder.anonymizeRepo",
     async () => {
@@ -93,8 +119,12 @@ export function activate(context: vscode.ExtensionContext) {
 
   const editHistoryVisualizationCmd = vscode.commands.registerCommand(
     "flightRecorder.editHistoryVisualization",
-    async () => {
-      await startEditHistoryVisualization(context);
+    async (revision?: unknown) => {
+      // The history panel passes the recording branch; the command palette passes nothing.
+      await startEditHistoryVisualization(
+        context,
+        typeof revision === "string" ? revision : undefined
+      );
     }
   );
 
@@ -104,9 +134,19 @@ export function activate(context: vscode.ExtensionContext) {
     printCmd,
     exportChatsCmd,
     configureClaudeHooksCmd,
+    configureOpenCodePluginCmd,
     anonymizeRepoCmd,
     editHistoryVisualizationCmd
   );
+
+  return {
+    isRecording,
+    getRecordingBranchState,
+    getPersistedRecordingBranchState: () =>
+      context.workspaceState.get<RecordingBranchUiState>(LAST_RECORDING_BRANCH_STATE_KEY),
+    listUnfinishedRecordings,
+    getPanelBranchState,
+  };
 }
 
 /** Extension deactivation entry point: tears down the edit history visualization and stops any active recording. */

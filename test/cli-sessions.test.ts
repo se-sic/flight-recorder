@@ -5,11 +5,13 @@ import * as path from "node:path";
 import test from "node:test";
 import {
   CopilotCliEventParser,
+  copilotCliSessionsActiveSince,
   CopilotCliSessionWatcher,
   findCopilotCliSessionsForRepo,
   parseCopilotCliWorkspace,
 } from "../src/recording/agents/copilot/cli-sessions";
 import type { AssistantEvent } from "../src/recording/event";
+import { normalizePath } from "../src/utils/fs-path";
 
 function toolStart(id: string, toolName: string, args: unknown): string {
   return JSON.stringify({
@@ -68,10 +70,9 @@ test("findCopilotCliSessionsForRepo matches sessions by cwd or git_root", async 
 
 test("CopilotCliEventParser emits events for successful edit tools only", () => {
   const parser = new CopilotCliEventParser("session-1");
-  // The CLI reports upper-case drive letters; VS Code uses lower-case ones.
-  const vscodePath = (p: string) => p.replace(/^[A-Z]:/, (d) => d.toLowerCase());
-  const file = vscodePath(path.resolve("repo", "src", "main.py"));
-  const cliFile = file.replace(/^[a-z]:/, (d) => d.toUpperCase());
+  // Parsed paths are normalized (upper-case drive letter), whatever the CLI reports.
+  const file = normalizePath("repo", "src", "main.py");
+  const cliFile = file.replace(/^[A-Z]:/, (d) => d.toLowerCase());
   const patch = `*** Begin Patch\n*** Update File: ${cliFile}\n@@\n-a\n+b\n*** End Patch\n`;
 
   const input =
@@ -93,7 +94,7 @@ test("CopilotCliEventParser emits events for successful edit tools only", () => 
   assert.equal(events.length, 2);
   assert.equal(events[0].toolName, "create");
   assert.deepEqual(events[0].fileOperations, [
-    { kind: "create", path: vscodePath(path.resolve("new.py")) },
+    { kind: "create", path: normalizePath("new.py") },
   ]);
   assert.equal(events[1].toolName, "apply_patch");
   assert.deepEqual(events[1].fileOperations, [{ kind: "update", path: file }]);
@@ -150,4 +151,26 @@ test("findCopilotCliSessionsForRepo returns empty list for missing state dir", a
     path.join(os.tmpdir(), "fr-cli-sessions-missing-dir")
   );
   assert.deepEqual(found, []);
+});
+
+test("copilotCliSessionsActiveSince keeps only sessions with files changed since the given time", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "fr-cli-active-"));
+  const makeSession = (name: string, mtime: Date) => {
+    const dir = path.join(root, name);
+    fs.mkdirSync(dir);
+    for (const file of ["events.jsonl", "workspace.yaml"]) {
+      fs.writeFileSync(path.join(dir, file), "x\n");
+      fs.utimesSync(path.join(dir, file), mtime, mtime);
+    }
+    return { dir, workspace: { dirs: [root] } };
+  };
+  const recordingStart = new Date("2026-11-04T12:00:00Z");
+  const old = makeSession("old", new Date("2026-10-08T12:00:00Z"));
+  const current = makeSession("current", new Date("2026-11-04T12:30:00Z"));
+  fs.utimesSync(path.join(current.dir, "workspace.yaml"), new Date("2026-10-01"), new Date("2026-10-01"));
+
+  const active = await copilotCliSessionsActiveSince([old, current], recordingStart);
+
+  assert.deepEqual(active.map((session) => path.basename(session.dir)), ["current"]);
+  fs.rmSync(root, { recursive: true, force: true });
 });
